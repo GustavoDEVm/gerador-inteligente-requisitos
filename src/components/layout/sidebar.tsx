@@ -50,7 +50,7 @@ export function Sidebar({ mobileOpen, onNavigate }: SidebarProps) {
         </nav>
         <div className="mt-auto rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500">
           <strong className="block text-slate-700">Fluxo do TCC</strong>
-          Projetos → Elicitação → Análise futura → Requisitos
+          Projetos → Elicitação → IA e refinamento → Requisitos
         </div>
       </aside>
     </>
