@@ -1,0 +1,422 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ProjectStatus {
+  ACTIVE
+  IN_REVIEW
+  COMPLETED
+  ARCHIVED
+}
+
+enum SessionStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum QuestionSource {
+  MANUAL
+  TEMPLATE
+  AI
+}
+
+enum RequirementType {
+  FUNCTIONAL
+  NON_FUNCTIONAL
+}
+
+enum Priority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum ReviewStatus {
+  PENDING
+  IN_REVIEW
+  REVIEWED
+  REJECTED
+  OBSOLETE
+}
+
+enum AIAnalysisType {
+  REQUIREMENT_EXTRACTION
+  AMBIGUITY_DETECTION
+  QUESTION_GENERATION
+  REFINEMENT
+  SUGGESTION_GENERATION
+}
+
+enum AIAnalysisStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  INVALID_RESPONSE
+  CANCELLED
+}
+
+enum AmbiguitySeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum AmbiguityStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+enum SuggestionStatus {
+  PENDING
+  ACCEPTED
+  DISMISSED
+}
+
+enum ActivityAction {
+  PROJECT_CREATED
+  PROJECT_UPDATED
+  PROJECT_ARCHIVED
+  SESSION_STARTED
+  SESSION_COMPLETED
+  QUESTION_ADDED
+  ANSWER_RECORDED
+  ANALYSIS_COMPLETED
+  REQUIREMENT_CREATED
+  REQUIREMENT_UPDATED
+  STORY_CREATED
+  STORY_UPDATED
+}
+
+enum ActivityEntityType {
+  PROJECT
+  SESSION
+  QUESTION
+  ANSWER
+  ANALYSIS
+  REQUIREMENT
+  USER_STORY
+  AMBIGUITY
+  SUGGESTION
+}
+
+model User {
+  id                  String               @id @default(uuid()) @db.Uuid
+  name                String
+  email               String               @unique
+  passwordHash        String?              @map("password_hash")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  ownedProjects       Project[]            @relation("ProjectOwner")
+  createdSessions     ElicitationSession[] @relation("SessionCreator")
+  answers             ElicitationAnswer[]
+  createdRequirements Requirement[]        @relation("RequirementCreator")
+  createdUserStories  UserStory[]          @relation("UserStoryCreator")
+  requestedAnalyses   AIAnalysis[]         @relation("AnalysisRequester")
+  resolvedAmbiguities Ambiguity[]          @relation("AmbiguityResolver")
+  decidedSuggestions  Suggestion[]         @relation("SuggestionDecider")
+  activities          ActivityLog[]        @relation("ActivityActor")
+
+  @@map("users")
+}
+
+model Project {
+  id           String               @id @default(uuid()) @db.Uuid
+  ownerId      String               @map("owner_id") @db.Uuid
+  name         String
+  description  String               @db.Text
+  objective    String               @db.Text
+  context      String               @db.Text
+  status       ProjectStatus        @default(ACTIVE)
+  archivedAt   DateTime?            @map("archived_at")
+  createdAt    DateTime             @default(now()) @map("created_at")
+  updatedAt    DateTime             @updatedAt @map("updated_at")
+  owner        User                 @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  stakeholders Stakeholder[]
+  sessions     ElicitationSession[]
+  analyses     AIAnalysis[]
+  requirements Requirement[]
+  userStories  UserStory[]
+  ambiguities  Ambiguity[]
+  suggestions  Suggestion[]
+  activities   ActivityLog[]
+
+  @@index([ownerId, status, updatedAt])
+  @@map("projects")
+}
+
+model Stakeholder {
+  id        String   @id @default(uuid()) @db.Uuid
+  projectId String   @map("project_id") @db.Uuid
+  name      String
+  role      String?
+  createdAt DateTime @default(now()) @map("created_at")
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([projectId, name])
+  @@map("stakeholders")
+}
+
+model ElicitationSession {
+  id          String                @id @default(uuid()) @db.Uuid
+  projectId   String                @map("project_id") @db.Uuid
+  createdById String                @map("created_by_id") @db.Uuid
+  sequence    Int
+  title       String?
+  context     String                @db.Text
+  status      SessionStatus         @default(DRAFT)
+  startedAt   DateTime?             @map("started_at")
+  completedAt DateTime?             @map("completed_at")
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+  project     Project               @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy   User                  @relation("SessionCreator", fields: [createdById], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  questions   ElicitationQuestion[]
+  analyses    AIAnalysisSession[]
+
+  @@unique([projectId, sequence])
+  @@index([projectId, status, createdAt])
+  @@map("elicitation_sessions")
+}
+
+model ElicitationQuestion {
+  id                    String              @id @default(uuid()) @db.Uuid
+  sessionId             String              @map("session_id") @db.Uuid
+  position              Int
+  content               String              @db.Text
+  guidance              String?             @db.Text
+  source                QuestionSource      @default(MANUAL)
+  generatedByAnalysisId String?             @map("generated_by_analysis_id") @db.Uuid
+  askedAt               DateTime?           @map("asked_at")
+  createdAt             DateTime            @default(now()) @map("created_at")
+  session               ElicitationSession  @relation(fields: [sessionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  generatedByAnalysis   AIAnalysis?         @relation("GeneratedQuestions", fields: [generatedByAnalysisId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  answers               ElicitationAnswer[]
+
+  @@unique([sessionId, position])
+  @@map("elicitation_questions")
+}
+
+model ElicitationAnswer {
+  id                 String                    @id @default(uuid()) @db.Uuid
+  questionId         String                    @map("question_id") @db.Uuid
+  authorId           String                    @map("author_id") @db.Uuid
+  version            Int                       @default(1)
+  content            String                    @db.Text
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  question           ElicitationQuestion       @relation(fields: [questionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  author             User                      @relation(fields: [authorId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  requirementSources RequirementAnswerSource[]
+
+  @@unique([questionId, version])
+  @@index([questionId, createdAt])
+  @@map("elicitation_answers")
+}
+
+model AIAnalysis {
+  id                 String                      @id @default(uuid()) @db.Uuid
+  projectId          String                      @map("project_id") @db.Uuid
+  requestedById      String?                     @map("requested_by_id") @db.Uuid
+  type               AIAnalysisType
+  status             AIAnalysisStatus            @default(PENDING)
+  provider           String
+  model              String
+  promptVersion      String                      @map("prompt_version")
+  promptText         String                      @map("prompt_text") @db.Text
+  inputSnapshot      Json                        @map("input_snapshot")
+  responsePayload    Json?                       @map("response_payload")
+  structuredOutput   Json?                       @map("structured_output")
+  errorCode          String?                     @map("error_code")
+  startedAt          DateTime                    @default(now()) @map("started_at")
+  completedAt        DateTime?                   @map("completed_at")
+  createdAt          DateTime                    @default(now()) @map("created_at")
+  project            Project                     @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  requestedBy        User?                       @relation("AnalysisRequester", fields: [requestedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  sessions           AIAnalysisSession[]
+  generatedQuestions ElicitationQuestion[]       @relation("GeneratedQuestions")
+  requirementSources RequirementAnalysisSource[]
+  generatedStories   UserStory[]                 @relation("GeneratedUserStories")
+  ambiguities        Ambiguity[]                 @relation("GeneratedAmbiguities")
+  suggestions        Suggestion[]                @relation("GeneratedSuggestions")
+
+  @@index([projectId, status, createdAt])
+  @@map("ai_analyses")
+}
+
+model AIAnalysisSession {
+  analysisId String             @map("analysis_id") @db.Uuid
+  sessionId  String             @map("session_id") @db.Uuid
+  createdAt  DateTime           @default(now()) @map("created_at")
+  analysis   AIAnalysis         @relation(fields: [analysisId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  session    ElicitationSession @relation(fields: [sessionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@id([analysisId, sessionId])
+  @@index([sessionId])
+  @@map("ai_analysis_sessions")
+}
+
+model Requirement {
+  id              String                      @id @default(uuid()) @db.Uuid
+  projectId       String                      @map("project_id") @db.Uuid
+  createdById     String?                     @map("created_by_id") @db.Uuid
+  code            String
+  title           String
+  description     String                      @db.Text
+  type            RequirementType
+  priority        Priority                    @default(MEDIUM)
+  status          ReviewStatus                @default(PENDING)
+  version         Int                         @default(1)
+  archivedAt      DateTime?                   @map("archived_at")
+  createdAt       DateTime                    @default(now()) @map("created_at")
+  updatedAt       DateTime                    @updatedAt @map("updated_at")
+  project         Project                     @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy       User?                       @relation("RequirementCreator", fields: [createdById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  answerSources   RequirementAnswerSource[]
+  analysisSources RequirementAnalysisSource[]
+  userStoryLinks  RequirementUserStory[]
+
+  @@unique([projectId, code])
+  @@index([projectId, status, priority])
+  @@index([projectId, type])
+  @@map("requirements")
+}
+
+model RequirementAnswerSource {
+  requirementId String            @map("requirement_id") @db.Uuid
+  answerId      String            @map("answer_id") @db.Uuid
+  createdAt     DateTime          @default(now()) @map("created_at")
+  requirement   Requirement       @relation(fields: [requirementId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  answer        ElicitationAnswer @relation(fields: [answerId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([requirementId, answerId])
+  @@index([answerId])
+  @@map("requirement_answer_sources")
+}
+
+model RequirementAnalysisSource {
+  requirementId String      @map("requirement_id") @db.Uuid
+  analysisId    String      @map("analysis_id") @db.Uuid
+  createdAt     DateTime    @default(now()) @map("created_at")
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  analysis      AIAnalysis  @relation(fields: [analysisId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([requirementId, analysisId])
+  @@index([analysisId])
+  @@map("requirement_analysis_sources")
+}
+
+model UserStory {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  projectId             String                 @map("project_id") @db.Uuid
+  createdById           String?                @map("created_by_id") @db.Uuid
+  generatedByAnalysisId String?                @map("generated_by_analysis_id") @db.Uuid
+  code                  String
+  title                 String
+  actor                 String
+  objective             String                 @db.Text
+  benefit               String                 @db.Text
+  description           String?                @db.Text
+  priority              Priority               @default(MEDIUM)
+  status                ReviewStatus           @default(PENDING)
+  version               Int                    @default(1)
+  archivedAt            DateTime?              @map("archived_at")
+  createdAt             DateTime               @default(now()) @map("created_at")
+  updatedAt             DateTime               @updatedAt @map("updated_at")
+  project               Project                @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy             User?                  @relation("UserStoryCreator", fields: [createdById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  generatedByAnalysis   AIAnalysis?            @relation("GeneratedUserStories", fields: [generatedByAnalysisId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  requirementLinks      RequirementUserStory[]
+  acceptanceCriteria    AcceptanceCriterion[]
+
+  @@unique([projectId, code])
+  @@index([projectId, status, priority])
+  @@map("user_stories")
+}
+
+model RequirementUserStory {
+  requirementId String      @map("requirement_id") @db.Uuid
+  userStoryId   String      @map("user_story_id") @db.Uuid
+  createdAt     DateTime    @default(now()) @map("created_at")
+  requirement   Requirement @relation(fields: [requirementId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  userStory     UserStory   @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([requirementId, userStoryId])
+  @@index([userStoryId])
+  @@map("requirement_user_stories")
+}
+
+model AcceptanceCriterion {
+  id          String    @id @default(uuid()) @db.Uuid
+  userStoryId String    @map("user_story_id") @db.Uuid
+  position    Int
+  description String    @db.Text
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  userStory   UserStory @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([userStoryId, position])
+  @@map("acceptance_criteria")
+}
+
+model Ambiguity {
+  id                    String            @id @default(uuid()) @db.Uuid
+  projectId             String            @map("project_id") @db.Uuid
+  generatedByAnalysisId String?           @map("generated_by_analysis_id") @db.Uuid
+  resolvedById          String?           @map("resolved_by_id") @db.Uuid
+  description           String            @db.Text
+  severity              AmbiguitySeverity @default(MEDIUM)
+  status                AmbiguityStatus   @default(OPEN)
+  resolution            String?           @db.Text
+  resolvedAt            DateTime?         @map("resolved_at")
+  createdAt             DateTime          @default(now()) @map("created_at")
+  updatedAt             DateTime          @updatedAt @map("updated_at")
+  project               Project           @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  generatedByAnalysis   AIAnalysis?       @relation("GeneratedAmbiguities", fields: [generatedByAnalysisId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  resolvedBy            User?             @relation("AmbiguityResolver", fields: [resolvedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([projectId, status, severity])
+  @@map("ambiguities")
+}
+
+model Suggestion {
+  id                    String           @id @default(uuid()) @db.Uuid
+  projectId             String           @map("project_id") @db.Uuid
+  generatedByAnalysisId String?          @map("generated_by_analysis_id") @db.Uuid
+  decidedById           String?          @map("decided_by_id") @db.Uuid
+  description           String           @db.Text
+  status                SuggestionStatus @default(PENDING)
+  decidedAt             DateTime?        @map("decided_at")
+  createdAt             DateTime         @default(now()) @map("created_at")
+  updatedAt             DateTime         @updatedAt @map("updated_at")
+  project               Project          @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  generatedByAnalysis   AIAnalysis?      @relation("GeneratedSuggestions", fields: [generatedByAnalysisId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  decidedBy             User?            @relation("SuggestionDecider", fields: [decidedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([projectId, status])
+  @@map("suggestions")
+}
+
+model ActivityLog {
+  id         String             @id @default(uuid()) @db.Uuid
+  projectId  String             @map("project_id") @db.Uuid
+  actorId    String?            @map("actor_id") @db.Uuid
+  action     ActivityAction
+  entityType ActivityEntityType @map("entity_type")
+  entityId   String             @map("entity_id") @db.Uuid
+  summary    String
+  metadata   Json?
+  createdAt  DateTime           @default(now()) @map("created_at")
+  project    Project            @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  actor      User?              @relation("ActivityActor", fields: [actorId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([projectId, createdAt])
+  @@map("activity_logs")
+}
