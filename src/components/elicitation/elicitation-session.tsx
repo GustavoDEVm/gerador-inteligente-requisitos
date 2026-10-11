@@ -39,6 +39,18 @@ type QuestionItem = {
 
 type StartedElicitation = { session: SessionItem };
 
+type PersistedSessionAnalysis = {
+  id: string;
+  type: "REQUIREMENT_EXTRACTION" | "AMBIGUITY_DETECTION" | "QUESTION_GENERATION" | "REFINEMENT";
+  status: "SUCCEEDED";
+  structuredOutput: unknown;
+  createdAt: string;
+};
+
+type SessionDetails = {
+  analyses: { analysis: PersistedSessionAnalysis }[];
+};
+
 export function ElicitationSession({ initialProjectId }: { initialProjectId?: string }) {
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [projectId, setProjectId] = useState("");
@@ -101,8 +113,12 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
     if (!sessionId) return;
 
     let active = true;
-    apiFetch<QuestionItem[]>(`/api/sessions/${sessionId}/questions`)
-      .then((items) => {
+    async function loadSession() {
+      try {
+        const [items, session] = await Promise.all([
+          apiFetch<QuestionItem[]>(`/api/sessions/${sessionId}/questions`),
+          apiFetch<SessionDetails>(`/api/sessions/${sessionId}`),
+        ]);
         if (!active) return;
         const elicitationQuestions = items.filter((item) => item.source !== "AI");
         const savedAnswers = Object.fromEntries(
@@ -111,16 +127,23 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
             return latestAnswer ? [[item.id, latestAnswer]] : [];
           }),
         );
+        const rehydratedResults = rehydratePersistedAnalysisResults(session.analyses.map((item) => item.analysis));
         setQuestions(items);
         setRefinementAnalysisId(latestRefinementAnalysisIdFromItems(items));
         setAnswers(savedAnswers);
+        setAmbiguityResult(rehydratedResults.ambiguityResult);
+        setRefinementResult(rehydratedResults.refinementResult);
+        setGeneratedResult(rehydratedResults.generatedResult);
+        setRefinedResult(rehydratedResults.refinedResult);
         setCurrentIndex(0);
         setAnswer(savedAnswers[elicitationQuestions[0]?.id ?? ""] ?? "");
         setFinished(false);
-      })
-      .catch((requestError: unknown) => {
+      } catch (requestError) {
         if (active) setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar as perguntas.");
-      });
+      }
+    }
+
+    void loadSession();
     return () => { active = false; };
   }, [sessionId]);
 
@@ -150,6 +173,7 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
       setRefinementResult(null);
       setRefinementAnalysisId(null);
       setGeneratedResult(null);
+      setRefinedResult(null);
       setSessionTitle("");
       setInitialDescription("");
     } catch (requestError) {
@@ -386,6 +410,74 @@ function latestRefinementAnalysisIdFromItems(items: QuestionItem[]): string | nu
 
   const question = items.find((item) => item.id === lastQuestionId);
   return question?.generatedByAnalysis?.id ?? null;
+}
+
+function rehydratePersistedAnalysisResults(analyses: PersistedSessionAnalysis[]) {
+  let ambiguityResult: AmbiguityDetectionResponse | null = null;
+  let refinementResult: RefinementQuestionsResponse | null = null;
+  let generatedResult: RequirementsGenerationResponse | null = null;
+  let refinedResult: RequirementsGenerationResponse | null = null;
+
+  for (const analysis of [...analyses].sort((first, second) => new Date(first.createdAt).getTime() - new Date(second.createdAt).getTime())) {
+    if (analysis.type === "AMBIGUITY_DETECTION" && isAmbiguityDetectionResult(analysis.structuredOutput)) {
+      ambiguityResult = { analysisId: analysis.id, result: analysis.structuredOutput };
+    }
+    if (analysis.type === "QUESTION_GENERATION" && isRefinementQuestionsResult(analysis.structuredOutput)) {
+      refinementResult = { analysisId: analysis.id, result: analysis.structuredOutput };
+    }
+    if (analysis.type === "REQUIREMENT_EXTRACTION" && isRequirementsGenerationResult(analysis.structuredOutput)) {
+      generatedResult = { analysisId: analysis.id, result: analysis.structuredOutput };
+    }
+    if (analysis.type === "REFINEMENT" && isRequirementsGenerationResult(analysis.structuredOutput)) {
+      refinedResult = { analysisId: analysis.id, result: analysis.structuredOutput };
+    }
+  }
+
+  return { ambiguityResult, refinementResult, generatedResult, refinedResult };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isRequirementsGenerationResult(value: unknown): value is RequirementsGenerationResponse["result"] {
+  if (!isRecord(value) || !isRecord(value.userStory)) return false;
+  const userStory = value.userStory;
+  if (![userStory.actor, userStory.action, userStory.benefit].every((field) => typeof field === "string")) return false;
+  if (!Array.isArray(value.functionalRequirements) || !Array.isArray(value.nonFunctionalRequirements) || !Array.isArray(value.acceptanceCriteria)) return false;
+
+  return value.functionalRequirements.every((item) => (
+    isRecord(item) && typeof item.code === "string" && typeof item.title === "string" && typeof item.description === "string"
+  )) && value.nonFunctionalRequirements.every((item) => (
+    isRecord(item) && typeof item.code === "string" && typeof item.category === "string" && typeof item.description === "string"
+  )) && value.acceptanceCriteria.every((item) => isRecord(item) && typeof item.description === "string");
+}
+
+function isAmbiguityDetectionResult(value: unknown): value is AmbiguityDetectionResponse["result"] {
+  return isRecord(value)
+    && Array.isArray(value.ambiguities)
+    && value.ambiguities.every((item) => (
+      isRecord(item)
+      && typeof item.description === "string"
+      && ["low", "medium", "high"].includes(String(item.severity))
+      && typeof item.context === "string"
+    ));
+}
+
+function isRefinementQuestionsResult(value: unknown): value is RefinementQuestionsResponse["result"] {
+  return isRecord(value)
+    && Array.isArray(value.questions)
+    && value.questions.every((item) => (
+      isRecord(item)
+      && typeof item.questionId === "string"
+      && typeof item.ambiguityId === "string"
+      && typeof item.question === "string"
+      && typeof item.reason === "string"
+      && isRecord(item.ambiguity)
+      && typeof item.ambiguity.description === "string"
+      && ["low", "medium", "high"].includes(String(item.ambiguity.severity))
+      && (item.ambiguity.context === null || typeof item.ambiguity.context === "string")
+    ));
 }
 
 function getPersistedRefinementQuestion(value: unknown, questionId: string): PersistedRefinementQuestion | null {

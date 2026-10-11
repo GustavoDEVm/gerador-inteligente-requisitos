@@ -24,6 +24,26 @@ export async function getSession(id: string, userId: string) {
       project: { select: { id: true, name: true } },
       createdBy: { select: { id: true, name: true } },
       questions: { orderBy: { position: "asc" }, include: { answers: { orderBy: { version: "asc" }, include: { author: { select: { id: true, name: true } } } } } },
+      analyses: {
+        where: {
+          analysis: {
+            status: "SUCCEEDED",
+            type: { in: ["REQUIREMENT_EXTRACTION", "AMBIGUITY_DETECTION", "QUESTION_GENERATION", "REFINEMENT"] },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+        select: {
+          analysis: {
+            select: {
+              id: true,
+              type: true,
+              status: true,
+              structuredOutput: true,
+              createdAt: true,
+            },
+          },
+        },
+      },
     },
   });
   if (!session) throw notFound("Sessão de elicitação");
@@ -150,16 +170,16 @@ export async function updateSession(id: string, userId: string, data: { title?: 
 
 export async function listQuestions(sessionId: string, userId: string) {
   const session = await requireOwnedSession(prisma, sessionId, userId);
-  const [latestRefinementAnalysis, latestAmbiguityAnalysis, questions] = await Promise.all([
+  const [latestRequirementsRefinement, latestAmbiguityAnalysis, questions] = await Promise.all([
     prisma.aIAnalysis.findFirst({
       where: {
         projectId: session.projectId,
-        type: "QUESTION_GENERATION",
+        type: "REFINEMENT",
         status: "SUCCEEDED",
         sessions: { some: { sessionId } },
       },
       orderBy: { createdAt: "desc" },
-      select: { id: true },
+      select: { inputSnapshot: true },
     }),
     prisma.aIAnalysis.findFirst({
       where: {
@@ -181,7 +201,27 @@ export async function listQuestions(sessionId: string, userId: string) {
     }),
   ]);
 
-  if (!latestRefinementAnalysis) return questions.filter((question) => question.source !== "AI");
+  const refinementQuestionAnalysisId = getRefinementQuestionAnalysisId(latestRequirementsRefinement?.inputSnapshot);
+  const questionAnalysisWhere = {
+    projectId: session.projectId,
+    type: "QUESTION_GENERATION" as const,
+    status: "SUCCEEDED" as const,
+    sessions: { some: { sessionId } },
+  };
+  const referencedQuestionAnalysis = refinementQuestionAnalysisId
+    ? await prisma.aIAnalysis.findFirst({ where: { ...questionAnalysisWhere, id: refinementQuestionAnalysisId }, select: { id: true } })
+    : null;
+  const selectedQuestionAnalysis = referencedQuestionAnalysis ?? await prisma.aIAnalysis.findFirst({
+    where: questionAnalysisWhere,
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+
+  if (!selectedQuestionAnalysis) return questions.filter((question) => question.source !== "AI");
+
+  if (referencedQuestionAnalysis) {
+    return questions.filter((question) => question.source !== "AI" || question.generatedByAnalysisId === referencedQuestionAnalysis.id);
+  }
 
   const latestAmbiguityIds = latestAmbiguityAnalysis
     ? new Set((await prisma.ambiguity.findMany({
@@ -192,12 +232,18 @@ export async function listQuestions(sessionId: string, userId: string) {
 
   return questions.filter((question) => {
     if (question.source !== "AI") return true;
-    if (question.generatedByAnalysisId !== latestRefinementAnalysis.id) return false;
+    if (question.generatedByAnalysisId !== selectedQuestionAnalysis.id) return false;
     if (!latestAmbiguityIds) return true;
 
     const ambiguityId = getRefinementQuestionAmbiguityId(question.generatedByAnalysis?.structuredOutput, question.id);
     return ambiguityId !== null && latestAmbiguityIds.has(ambiguityId);
   });
+}
+
+function getRefinementQuestionAnalysisId(value: unknown): string | null {
+  if (!value || typeof value !== "object" || !("refinementQuestionAnalysisId" in value)) return null;
+  const analysisId = (value as Record<string, unknown>).refinementQuestionAnalysisId;
+  return typeof analysisId === "string" ? analysisId : null;
 }
 
 function getRefinementQuestionAmbiguityId(value: unknown, questionId: string): string | null {
