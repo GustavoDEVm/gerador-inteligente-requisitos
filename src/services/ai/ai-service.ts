@@ -1,6 +1,6 @@
-import { Prisma, type PrismaClient } from "../../../generated/prisma/client";
+import { Prisma, type AIAnalysisStatus, type PrismaClient } from "../../../generated/prisma/client";
 
-import { invalidInput } from "@/lib/api/errors";
+import { conflict, invalidInput } from "@/lib/api/errors";
 import { prisma } from "@/lib/prisma";
 import { getAIConfiguration, type AIConfiguration } from "@/services/ai/config";
 import { AIProviderError, aiInvalidResponseError } from "@/services/ai/errors";
@@ -93,6 +93,8 @@ type ConfirmedRefinementRules = {
 };
 
 const DEFAULT_NON_FUNCTIONAL_REQUIREMENT_CATEGORY = "Geral";
+const ABANDONED_ANALYSIS_THRESHOLD_MS = 3 * 60_000;
+const ACTIVE_ANALYSIS_STATUSES: AIAnalysisStatus[] = ["PENDING", "RUNNING"];
 
 export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequirementsUseCase, RefineRequirementsUseCase, DetectAmbiguitiesUseCase, GenerateRefinementQuestionsUseCase {
   private readonly db: PrismaClient;
@@ -364,6 +366,22 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
         throw invalidInput("A sessão informada não pertence ao projeto selecionado.");
       }
 
+      await db.$queryRaw`SELECT "id" FROM "elicitation_sessions" WHERE "id" = ${session.id} FOR UPDATE`;
+      await this.recoverAbandonedAnalyses(db, input.projectId, session.id, prompt.analysisType);
+
+      const activeAnalysis = await db.aIAnalysis.findFirst({
+        where: {
+          projectId: input.projectId,
+          type: prompt.analysisType,
+          status: { in: ACTIVE_ANALYSIS_STATUSES },
+          sessions: { some: { sessionId: session.id } },
+        },
+        select: { id: true },
+      });
+      if (activeAnalysis) {
+        throw conflict("J\u00e1 existe uma opera\u00e7\u00e3o de IA deste tipo em andamento para esta sess\u00e3o. Aguarde sua conclus\u00e3o antes de tentar novamente.");
+      }
+
       preconditionsSucceeded = true;
       } catch (error) {
         preconditionsErrorName = error instanceof Error ? error.name : "UnknownError";
@@ -420,6 +438,38 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
       refinementAmbiguities: resolvedInput.refinementAmbiguities,
       refinementRules: resolvedInput.refinementRules,
     };
+  }
+
+  private async recoverAbandonedAnalyses(
+    db: Prisma.TransactionClient,
+    projectId: string,
+    sessionId: string,
+    analysisType: PromptDefinition["analysisType"],
+  ) {
+    const staleBefore = new Date(Date.now() - ABANDONED_ANALYSIS_THRESHOLD_MS);
+    const abandonedAnalyses = await db.aIAnalysis.findMany({
+      where: {
+        projectId,
+        type: analysisType,
+        status: { in: ACTIVE_ANALYSIS_STATUSES },
+        startedAt: { lt: staleBefore },
+        sessions: { some: { sessionId } },
+      },
+      select: { id: true },
+    });
+    if (abandonedAnalyses.length === 0) return;
+
+    await db.aIAnalysis.updateMany({
+      where: {
+        id: { in: abandonedAnalyses.map((analysis) => analysis.id) },
+        status: { in: ACTIVE_ANALYSIS_STATUSES },
+      },
+      data: {
+        status: "FAILED",
+        errorCode: "AI_OPERATION_ABANDONED",
+        completedAt: new Date(),
+      },
+    });
   }
 
   private async resolveInitialElicitationAnswer(

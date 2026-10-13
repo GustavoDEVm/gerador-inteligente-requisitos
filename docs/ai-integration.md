@@ -102,6 +102,14 @@ Cada execução cria um registro independente em `AIAnalysis`, inicialmente com 
 
 O registro não é reutilizado ou sobrescrito para uma nova análise. Em sucesso, o sistema também cria `ActivityLog` com `ANALYSIS_COMPLETED`. `responsePayload` permanece vazio nesta fase porque duplicaria a saída validada e poderia reter informações técnicas sem necessidade.
 
+## Coordenação de operações concorrentes
+
+A criação de cada `AIAnalysis` é coordenada no PostgreSQL pela linha da sessão de elicitação. Dentro de uma transação curta, o serviço bloqueia a sessão, verifica análises `PENDING` ou `RUNNING` do mesmo tipo vinculadas a ela e somente então cria a nova análise. A chamada ao provider ocorre depois do fim dessa transação.
+
+Assim, duas solicitações concorrentes da mesma operação para a mesma sessão recebem apenas uma execução: a segunda responde `409 CONFLICT`, sem chamar o provider ou criar artefatos. Operações de tipos distintos não são bloqueadas por essa regra. Depois que a primeira análise termina em `SUCCEEDED`, `FAILED`, `INVALID_RESPONSE` ou `CANCELLED`, uma nova execução intencional é permitida e cria novo histórico; resultados anteriores não são reutilizados.
+
+Para evitar bloqueio permanente em caso de queda inesperada do processo, uma análise equivalente em estado ativo iniciada há mais de três minutos é preservada e marcada como `FAILED`, com `errorCode = AI_OPERATION_ABANDONED`, antes da nova tentativa. O limite é mais conservador que o pior caso atual do Gemini: duas tentativas de 30 segundos, separadas por um segundo, além de margem para validação e persistência.
+
 ## Erros e limites
 
 | Código | HTTP | Situação |
