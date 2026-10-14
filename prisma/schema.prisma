@@ -81,6 +81,13 @@ enum SuggestionStatus {
   DISMISSED
 }
 
+enum RevisionOperation {
+  BASELINE
+  CREATED
+  UPDATED
+  ARCHIVED
+}
+
 enum ActivityAction {
   PROJECT_CREATED
   PROJECT_UPDATED
@@ -94,6 +101,9 @@ enum ActivityAction {
   REQUIREMENT_UPDATED
   STORY_CREATED
   STORY_UPDATED
+  CRITERION_CREATED
+  CRITERION_UPDATED
+  CRITERION_ARCHIVED
 }
 
 enum ActivityEntityType {
@@ -104,26 +114,30 @@ enum ActivityEntityType {
   ANALYSIS
   REQUIREMENT
   USER_STORY
+  ACCEPTANCE_CRITERION
   AMBIGUITY
   SUGGESTION
 }
 
 model User {
-  id                  String               @id @default(uuid()) @db.Uuid
-  name                String
-  email               String               @unique
-  passwordHash        String?              @map("password_hash")
-  createdAt           DateTime             @default(now()) @map("created_at")
-  updatedAt           DateTime             @updatedAt @map("updated_at")
-  ownedProjects       Project[]            @relation("ProjectOwner")
-  createdSessions     ElicitationSession[] @relation("SessionCreator")
-  answers             ElicitationAnswer[]
-  createdRequirements Requirement[]        @relation("RequirementCreator")
-  createdUserStories  UserStory[]          @relation("UserStoryCreator")
-  requestedAnalyses   AIAnalysis[]         @relation("AnalysisRequester")
-  resolvedAmbiguities Ambiguity[]          @relation("AmbiguityResolver")
-  decidedSuggestions  Suggestion[]         @relation("SuggestionDecider")
-  activities          ActivityLog[]        @relation("ActivityActor")
+  id                                  String                        @id @default(uuid()) @db.Uuid
+  name                                String
+  email                               String                        @unique
+  passwordHash                        String?                       @map("password_hash")
+  createdAt                           DateTime                      @default(now()) @map("created_at")
+  updatedAt                           DateTime                      @updatedAt @map("updated_at")
+  ownedProjects                       Project[]                     @relation("ProjectOwner")
+  createdSessions                     ElicitationSession[]          @relation("SessionCreator")
+  answers                             ElicitationAnswer[]
+  createdRequirements                 Requirement[]                 @relation("RequirementCreator")
+  createdUserStories                  UserStory[]                   @relation("UserStoryCreator")
+  changedRequirementRevisions         RequirementRevision[]         @relation("RequirementRevisionAuthor")
+  changedUserStoryRevisions           UserStoryRevision[]           @relation("UserStoryRevisionAuthor")
+  changedAcceptanceCriterionRevisions AcceptanceCriterionRevision[] @relation("AcceptanceCriterionRevisionAuthor")
+  requestedAnalyses                   AIAnalysis[]                  @relation("AnalysisRequester")
+  resolvedAmbiguities                 Ambiguity[]                   @relation("AmbiguityResolver")
+  decidedSuggestions                  Suggestion[]                  @relation("SuggestionDecider")
+  activities                          ActivityLog[]                 @relation("ActivityActor")
 
   @@map("users")
 }
@@ -282,11 +296,34 @@ model Requirement {
   answerSources   RequirementAnswerSource[]
   analysisSources RequirementAnalysisSource[]
   userStoryLinks  RequirementUserStory[]
+  revisions       RequirementRevision[]
 
   @@unique([projectId, code])
   @@index([projectId, status, priority])
   @@index([projectId, type])
   @@map("requirements")
+}
+
+model RequirementRevision {
+  id             String            @id @default(uuid()) @db.Uuid
+  requirementId  String            @map("requirement_id") @db.Uuid
+  revisionNumber Int               @map("revision_number")
+  operation      RevisionOperation
+  changedById    String?           @map("changed_by_id") @db.Uuid
+  code           String
+  title          String
+  description    String            @db.Text
+  type           RequirementType
+  priority       Priority
+  status         ReviewStatus
+  archivedAt     DateTime?         @map("archived_at")
+  createdAt      DateTime          @default(now()) @map("created_at")
+  requirement    Requirement       @relation(fields: [requirementId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  changedBy      User?             @relation("RequirementRevisionAuthor", fields: [changedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([requirementId, revisionNumber])
+  @@index([requirementId, createdAt])
+  @@map("requirement_revisions")
 }
 
 model RequirementAnswerSource {
@@ -314,31 +351,58 @@ model RequirementAnalysisSource {
 }
 
 model UserStory {
-  id                    String                 @id @default(uuid()) @db.Uuid
-  projectId             String                 @map("project_id") @db.Uuid
-  createdById           String?                @map("created_by_id") @db.Uuid
-  generatedByAnalysisId String?                @map("generated_by_analysis_id") @db.Uuid
-  code                  String
-  title                 String
-  actor                 String
-  objective             String                 @db.Text
-  benefit               String                 @db.Text
-  description           String?                @db.Text
-  priority              Priority               @default(MEDIUM)
-  status                ReviewStatus           @default(PENDING)
-  version               Int                    @default(1)
-  archivedAt            DateTime?              @map("archived_at")
-  createdAt             DateTime               @default(now()) @map("created_at")
-  updatedAt             DateTime               @updatedAt @map("updated_at")
-  project               Project                @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
-  createdBy             User?                  @relation("UserStoryCreator", fields: [createdById], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  generatedByAnalysis   AIAnalysis?            @relation("GeneratedUserStories", fields: [generatedByAnalysisId], references: [id], onDelete: SetNull, onUpdate: Cascade)
-  requirementLinks      RequirementUserStory[]
-  acceptanceCriteria    AcceptanceCriterion[]
+  id                           String                        @id @default(uuid()) @db.Uuid
+  projectId                    String                        @map("project_id") @db.Uuid
+  createdById                  String?                       @map("created_by_id") @db.Uuid
+  generatedByAnalysisId        String?                       @map("generated_by_analysis_id") @db.Uuid
+  code                         String
+  title                        String
+  actor                        String
+  objective                    String                        @db.Text
+  benefit                      String                        @db.Text
+  description                  String?                       @db.Text
+  priority                     Priority                      @default(MEDIUM)
+  status                       ReviewStatus                  @default(PENDING)
+  version                      Int                           @default(1)
+  archivedAt                   DateTime?                     @map("archived_at")
+  createdAt                    DateTime                      @default(now()) @map("created_at")
+  updatedAt                    DateTime                      @updatedAt @map("updated_at")
+  project                      Project                       @relation(fields: [projectId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  createdBy                    User?                         @relation("UserStoryCreator", fields: [createdById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  generatedByAnalysis          AIAnalysis?                   @relation("GeneratedUserStories", fields: [generatedByAnalysisId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  requirementLinks             RequirementUserStory[]
+  acceptanceCriteria           AcceptanceCriterion[]
+  acceptanceCriterionRevisions AcceptanceCriterionRevision[]
+  revisions                    UserStoryRevision[]
 
   @@unique([projectId, code])
   @@index([projectId, status, priority])
   @@map("user_stories")
+}
+
+model UserStoryRevision {
+  id                    String            @id @default(uuid()) @db.Uuid
+  userStoryId           String            @map("user_story_id") @db.Uuid
+  revisionNumber        Int               @map("revision_number")
+  operation             RevisionOperation
+  changedById           String?           @map("changed_by_id") @db.Uuid
+  code                  String
+  title                 String
+  actor                 String
+  objective             String            @db.Text
+  benefit               String            @db.Text
+  description           String?           @db.Text
+  priority              Priority
+  status                ReviewStatus
+  archivedAt            DateTime?         @map("archived_at")
+  generatedByAnalysisId String?           @map("generated_by_analysis_id") @db.Uuid
+  createdAt             DateTime          @default(now()) @map("created_at")
+  userStory             UserStory         @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  changedBy             User?             @relation("UserStoryRevisionAuthor", fields: [changedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([userStoryId, revisionNumber])
+  @@index([userStoryId, createdAt])
+  @@map("user_story_revisions")
 }
 
 model RequirementUserStory {
@@ -354,16 +418,40 @@ model RequirementUserStory {
 }
 
 model AcceptanceCriterion {
-  id          String    @id @default(uuid()) @db.Uuid
-  userStoryId String    @map("user_story_id") @db.Uuid
+  id          String                        @id @default(uuid()) @db.Uuid
+  userStoryId String                        @map("user_story_id") @db.Uuid
   position    Int
-  description String    @db.Text
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
-  userStory   UserStory @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  description String                        @db.Text
+  version     Int                           @default(1)
+  archivedAt  DateTime?                     @map("archived_at")
+  createdAt   DateTime                      @default(now()) @map("created_at")
+  updatedAt   DateTime                      @updatedAt @map("updated_at")
+  userStory   UserStory                     @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  revisions   AcceptanceCriterionRevision[]
 
   @@unique([userStoryId, position])
   @@map("acceptance_criteria")
+}
+
+model AcceptanceCriterionRevision {
+  id                    String              @id @default(uuid()) @db.Uuid
+  acceptanceCriterionId String              @map("acceptance_criterion_id") @db.Uuid
+  userStoryId           String              @map("user_story_id") @db.Uuid
+  revisionNumber        Int                 @map("revision_number")
+  operation             RevisionOperation
+  changedById           String?             @map("changed_by_id") @db.Uuid
+  description           String              @db.Text
+  position              Int
+  archivedAt            DateTime?           @map("archived_at")
+  createdAt             DateTime            @default(now()) @map("created_at")
+  acceptanceCriterion   AcceptanceCriterion @relation(fields: [acceptanceCriterionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  userStory             UserStory           @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  changedBy             User?               @relation("AcceptanceCriterionRevisionAuthor", fields: [changedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@unique([acceptanceCriterionId, revisionNumber])
+  @@index([acceptanceCriterionId, createdAt])
+  @@index([userStoryId, createdAt])
+  @@map("acceptance_criterion_revisions")
 }
 
 model Ambiguity {

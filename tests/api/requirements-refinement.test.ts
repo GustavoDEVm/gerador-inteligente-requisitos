@@ -11,6 +11,7 @@ import { prisma } from "../../src/lib/prisma";
 import { AIService } from "../../src/services/ai/ai-service";
 import { MOCK_MODEL, MockAIProvider } from "../../src/services/ai/providers/mock";
 import { requirementsGenerationSchema, toProviderJsonSchema } from "../../src/services/ai/schemas";
+import { createCriterion, deleteCriterion } from "../../src/services/user-stories";
 import type { AIProvider, StructuredGenerationRequest, StructuredGenerationResponse } from "../../src/services/ai/types";
 import type { RequirementsGenerationAIResult, RequirementsGenerationResponse } from "../../src/types/ai";
 
@@ -129,6 +130,13 @@ test("o refinamento cria uma nova análise e preserva requisitos e fontes anteri
         select: { id: true, code: true },
       });
       assert.ok(initialRequirements.length > 0);
+      const initialStory = await prisma.userStory.findFirstOrThrow({
+        where: { projectId: project.id, generatedByAnalysisId: initialGeneration.data.analysisId },
+      });
+      const archivedCriterion = await createCriterion(initialStory.id, owner.id, {
+        description: "Este critério arquivado não deve ser usado no refinamento.",
+      });
+      await deleteCriterion(archivedCriterion.id, owner.id);
 
       const ambiguityAnalysis = await prisma.aIAnalysis.create({
         data: {
@@ -239,10 +247,14 @@ test("o refinamento cria uma nova análise e preserva requisitos e fontes anteri
       assert.ok(refinementPayload.data.result.acceptanceCriteria.some((criterion) => criterion.description === "Quando um cliente não autenticado tentar finalizar um pedido, o sistema deve exigir sua autenticação antes da conclusão."));
       assert.ok(refinementPayload.data.result.functionalRequirements.some((requirement) => /estoque/i.test(requirement.description)));
       assert.ok(refinementPayload.data.result.functionalRequirements.some((requirement) => /tamanho e cor/i.test(requirement.description)));
-      const providerPayload = JSON.parse(providerInput) as { refinementAnswers: { question: string; answer: string }[] };
+      const providerPayload = JSON.parse(providerInput) as {
+        refinementAnswers: { question: string; answer: string }[];
+        previousRequirements: { acceptanceCriteria: string[] };
+      };
       const authenticationAnswer = providerPayload.refinementAnswers.find((answer) => /autenticado.*finalizar.*pedido/i.test(answer.question));
       assert.equal(authenticationAnswer?.question, "O cliente precisa estar autenticado para finalizar um pedido?");
       assert.equal(authenticationAnswer?.answer, "sim");
+      assert.equal(providerPayload.previousRequirements.acceptanceCriteria.includes("Este critério arquivado não deve ser usado no refinamento."), false);
 
       const refinedAnalysis = await prisma.aIAnalysis.findUniqueOrThrow({ where: { id: refinementPayload.data.analysisId } });
       assert.equal(refinedAnalysis.type, "REFINEMENT");

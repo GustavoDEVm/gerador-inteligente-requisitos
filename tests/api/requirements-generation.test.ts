@@ -196,6 +196,23 @@ test("a API gera, persiste e rastreia requisitos sem chamar Gemini", async () =>
       assert.ok(firstRequirements.every((requirement) => requirement.analysisSources.some((source) => source.analysisId === firstAnalysis.id)));
       assert.ok(firstRequirements.every((requirement) => requirement.answerSources.some((source) => source.answerId === initialAnswer.id)));
       assert.ok(firstRequirements.every((requirement) => requirement.userStoryLinks.some((link) => link.userStoryId === firstAnalysis.generatedStories[0]?.id)));
+      const requirementRevisions = await prisma.requirementRevision.findMany({
+        where: { requirementId: { in: firstRequirements.map((requirement) => requirement.id) } },
+        orderBy: [{ requirementId: "asc" }, { revisionNumber: "asc" }],
+      });
+      assert.equal(requirementRevisions.length, expectedRequirementCount);
+      assert.ok(requirementRevisions.every((revision) => revision.operation === "CREATED" && revision.revisionNumber === 1));
+      const generatedStory = firstAnalysis.generatedStories[0];
+      assert.ok(generatedStory);
+      const generatedStoryRevisions = await prisma.userStoryRevision.findMany({ where: { userStoryId: generatedStory.id } });
+      assert.equal(generatedStoryRevisions.length, 1);
+      assert.equal(generatedStoryRevisions[0]?.operation, "CREATED");
+      assert.equal(generatedStoryRevisions[0]?.generatedByAnalysisId, firstAnalysis.id);
+      const generatedCriterionRevisions = await prisma.acceptanceCriterionRevision.findMany({
+        where: { acceptanceCriterionId: { in: generatedStory.acceptanceCriteria.map((criterion) => criterion.id) } },
+      });
+      assert.equal(generatedCriterionRevisions.length, generatedStory.acceptanceCriteria.length);
+      assert.ok(generatedCriterionRevisions.every((revision) => revision.operation === "CREATED" && revision.revisionNumber === 1));
       const persistedNonFunctionalRequirement = firstRequirements.find((requirement) => requirement.type === "NON_FUNCTIONAL");
       assert.equal(persistedNonFunctionalRequirement?.title, "Geral");
       assert.equal(persistedNonFunctionalRequirement?.description, firstPayload.data.result.nonFunctionalRequirements[0]?.description);

@@ -1,3 +1,5 @@
+import { type Prisma, type Requirement, type RevisionOperation } from "../../generated/prisma/client";
+
 import { prisma } from "@/lib/prisma";
 import { invalidInput, notFound } from "@/lib/api/errors";
 import { logActivity, requireOwnedProject, requireOwnedRequirement, requireUser } from "@/services/shared";
@@ -35,11 +37,24 @@ export async function getRequirement(id: string, userId: string) {
       createdBy: { select: { id: true, name: true } },
       answerSources: { include: { answer: { include: { question: { include: { session: { select: { id: true, projectId: true, sequence: true, title: true } } } } } } } },
       analysisSources: { include: { analysis: { select: { id: true, type: true, status: true, createdAt: true } } } },
-      userStoryLinks: { include: { userStory: { include: { acceptanceCriteria: { orderBy: { position: "asc" } } } } } },
+      userStoryLinks: { include: { userStory: { include: { acceptanceCriteria: { where: { archivedAt: null }, orderBy: { position: "asc" } } } } } },
+      revisions: {
+        orderBy: { revisionNumber: "asc" },
+        include: { changedBy: { select: { id: true, name: true } } },
+      },
     },
   });
   if (!requirement) throw notFound("Requisito");
   return requirement;
+}
+
+export async function listRequirementRevisions(id: string, userId: string) {
+  await requireOwnedRequirement(prisma, id, userId);
+  return prisma.requirementRevision.findMany({
+    where: { requirementId: id },
+    orderBy: { revisionNumber: "asc" },
+    include: { changedBy: { select: { id: true, name: true } } },
+  });
 }
 
 export async function createRequirement(projectId: string, userId: string, data: RequirementInput) {
@@ -71,6 +86,7 @@ export async function createRequirement(projectId: string, userId: string, data:
         answerSources: uniqueAnswerIds.length > 0 ? { create: uniqueAnswerIds.map((answerId) => ({ answerId })) } : undefined,
       },
     });
+    await createRequirementRevision(db, requirement, "CREATED", userId);
     await logActivity(db, {
       projectId,
       actorId: userId,
@@ -85,11 +101,12 @@ export async function createRequirement(projectId: string, userId: string, data:
 
 export async function updateRequirement(id: string, userId: string, data: RequirementUpdate) {
   return prisma.$transaction(async (db) => {
-    const before = await requireOwnedRequirement(db, id, userId);
+    const before = await lockOwnedRequirementForRevision(db, id, userId);
     const requirement = await db.requirement.update({
       where: { id },
       data: { ...data, version: { increment: 1 } },
     });
+    await createRequirementRevision(db, requirement, "UPDATED", userId);
     await logActivity(db, {
       projectId: requirement.projectId,
       actorId: userId,
@@ -98,10 +115,41 @@ export async function updateRequirement(id: string, userId: string, data: Requir
       entityId: id,
       summary: `Requisito ${requirement.code} atualizado para a versão ${requirement.version}.`,
       metadata: {
-        before: { title: before.title, type: before.type, priority: before.priority, status: before.status, version: before.version },
-        after: { title: requirement.title, type: requirement.type, priority: requirement.priority, status: requirement.status, version: requirement.version },
+        before: { title: before.title, description: before.description, type: before.type, priority: before.priority, status: before.status, version: before.version },
+        after: { title: requirement.title, description: requirement.description, type: requirement.type, priority: requirement.priority, status: requirement.status, version: requirement.version },
       },
     });
     return requirement;
   });
+}
+
+export async function createRequirementRevision(
+  db: Prisma.TransactionClient,
+  requirement: Pick<Requirement, "id" | "code" | "title" | "description" | "type" | "priority" | "status" | "version" | "archivedAt">,
+  operation: RevisionOperation,
+  changedById: string | null,
+) {
+  return db.requirementRevision.create({
+    data: {
+      requirementId: requirement.id,
+      revisionNumber: requirement.version,
+      operation,
+      changedById,
+      code: requirement.code,
+      title: requirement.title,
+      description: requirement.description,
+      type: requirement.type,
+      priority: requirement.priority,
+      status: requirement.status,
+      archivedAt: requirement.archivedAt,
+    },
+  });
+}
+
+async function lockOwnedRequirementForRevision(db: Prisma.TransactionClient, id: string, userId: string) {
+  await requireOwnedRequirement(db, id, userId);
+  await db.$queryRaw`SELECT "id" FROM "requirements" WHERE "id" = ${id} FOR UPDATE`;
+  const requirement = await db.requirement.findUnique({ where: { id } });
+  if (!requirement) throw notFound("Requisito");
+  return requirement;
 }

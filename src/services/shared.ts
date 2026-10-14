@@ -87,8 +87,11 @@ export async function logActivity(
       | "REQUIREMENT_CREATED"
       | "REQUIREMENT_UPDATED"
       | "STORY_CREATED"
-      | "STORY_UPDATED";
-    entityType: "PROJECT" | "SESSION" | "QUESTION" | "ANSWER" | "ANALYSIS" | "REQUIREMENT" | "USER_STORY" | "AMBIGUITY" | "SUGGESTION";
+      | "STORY_UPDATED"
+      | "CRITERION_CREATED"
+      | "CRITERION_UPDATED"
+      | "CRITERION_ARCHIVED";
+    entityType: "PROJECT" | "SESSION" | "QUESTION" | "ANSWER" | "ANALYSIS" | "REQUIREMENT" | "USER_STORY" | "ACCEPTANCE_CRITERION" | "AMBIGUITY" | "SUGGESTION";
     entityId: string;
     summary: string;
     metadata?: Prisma.InputJsonValue;

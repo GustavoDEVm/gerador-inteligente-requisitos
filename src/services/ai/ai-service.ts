@@ -13,7 +13,9 @@ import { GENERATE_REQUIREMENTS_PROMPT, GENERATE_REQUIREMENTS_PROMPT_VERSION } fr
 import { REFINE_REQUIREMENTS_PROMPT, REFINE_REQUIREMENTS_PROMPT_VERSION } from "@/services/ai/prompts/refine-requirements";
 import { ambiguityDetectionSchema, initialRequirementAnalysisSchema, refinementQuestionsSchema, requirementsGenerationSchema, toProviderJsonSchema } from "@/services/ai/schemas";
 import type { AIProviderFactory } from "@/services/ai/types";
+import { createRequirementRevision } from "@/services/requirements";
 import { logActivity, nextPosition, requireOwnedProject, requireOwnedSession } from "@/services/shared";
+import { createAcceptanceCriterionRevision, createUserStoryRevision } from "@/services/user-stories";
 import type { AmbiguityDetectionResponse, AmbiguityDetectionResult, DetectedAmbiguity, DetectedAmbiguitySeverity, InitialAnalysisUserStory, InitialRequirementAnalysisResponse, PersistedRefinementQuestion, RefinementQuestionAIResult, RefinementQuestionAmbiguity, RefinementQuestionsResponse, RefinementQuestionsResult, RequirementsGenerationAIResult, RequirementsGenerationResponse, RequirementsGenerationResult } from "@/types/ai";
 
 type AIRequestContext = {
@@ -620,6 +622,7 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
           benefit: true,
           description: true,
           acceptanceCriteria: {
+            where: { archivedAt: null },
             orderBy: { position: "asc" },
             select: { description: true },
           },
@@ -945,6 +948,9 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
           }),
         ),
       ]);
+      await Promise.all(persistedRequirements.map((requirement) => (
+        createRequirementRevision(db, requirement, "CREATED", input.userId)
+      )));
       logAIEvent("ai-stage-completed", {
         ...timing,
         durationMs: Date.now() - requirementsPersistenceStartedAt,
@@ -965,6 +971,7 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
           description: result.userStory,
         },
       });
+      await createUserStoryRevision(db, userStory, "CREATED", input.userId);
       logAIEvent("ai-stage-completed", {
         ...timing,
         durationMs: Date.now() - userStoryPersistenceStartedAt,
@@ -972,13 +979,18 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
         stage: "user-story-persistence",
       });
       const acceptanceCriteriaPersistenceStartedAt = Date.now();
-      await db.acceptanceCriterion.createMany({
-        data: persistedAcceptanceCriteria.map((criterion, index) => ({
+      const acceptanceCriteria = await Promise.all(persistedAcceptanceCriteria.map((criterion, index) => (
+        db.acceptanceCriterion.create({
+          data: {
           userStoryId: userStory.id,
           position: index + 1,
           description: criterion.description,
-        })),
-      });
+          },
+        })
+      )));
+      await Promise.all(acceptanceCriteria.map((criterion) => (
+        createAcceptanceCriterionRevision(db, criterion, "CREATED", input.userId)
+      )));
       logAIEvent("ai-stage-completed", {
         ...timing,
         durationMs: Date.now() - acceptanceCriteriaPersistenceStartedAt,

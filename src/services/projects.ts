@@ -43,7 +43,7 @@ export async function getProject(id: string, userId: string) {
       stakeholders: { orderBy: { name: "asc" } },
       sessions: { orderBy: { sequence: "asc" }, include: { _count: { select: { questions: true } } } },
       requirements: { orderBy: { code: "asc" }, include: { userStoryLinks: { include: { userStory: true } } } },
-      userStories: { orderBy: { code: "asc" }, include: { acceptanceCriteria: { orderBy: { position: "asc" } } } },
+      userStories: { orderBy: { code: "asc" }, include: { acceptanceCriteria: { where: { archivedAt: null }, orderBy: { position: "asc" } } } },
       ambiguities: { orderBy: { createdAt: "desc" } },
       suggestions: { orderBy: { createdAt: "desc" } },
       _count: { select: { stakeholders: true, sessions: true, requirements: true, userStories: true } },

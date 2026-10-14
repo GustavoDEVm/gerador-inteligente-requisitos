@@ -1,3 +1,5 @@
+import { type AcceptanceCriterion, type Prisma, type RevisionOperation, type UserStory } from "../../generated/prisma/client";
+
 import { prisma } from "@/lib/prisma";
 import { conflict, invalidInput, notFound } from "@/lib/api/errors";
 import { logActivity, nextPosition, requireOwnedProject, requireOwnedRequirement, requireOwnedUserStory, requireUser } from "@/services/shared";
@@ -22,7 +24,7 @@ export async function listUserStories(projectId: string, userId: string) {
   return prisma.userStory.findMany({
     where: { projectId },
     include: {
-      acceptanceCriteria: { orderBy: { position: "asc" } },
+      acceptanceCriteria: { where: { archivedAt: null }, orderBy: { position: "asc" } },
       requirementLinks: { include: { requirement: { select: { id: true, code: true, title: true } } } },
       createdBy: { select: { id: true, name: true } },
     },
@@ -36,12 +38,25 @@ export async function getUserStory(id: string, userId: string) {
     where: { id },
     include: {
       createdBy: { select: { id: true, name: true } },
-      acceptanceCriteria: { orderBy: { position: "asc" } },
+      acceptanceCriteria: { where: { archivedAt: null }, orderBy: { position: "asc" } },
       requirementLinks: { include: { requirement: { select: { id: true, code: true, title: true, status: true } } } },
+      revisions: {
+        orderBy: { revisionNumber: "asc" },
+        include: { changedBy: { select: { id: true, name: true } } },
+      },
     },
   });
   if (!userStory) throw notFound("User Story");
   return userStory;
+}
+
+export async function listUserStoryRevisions(id: string, userId: string) {
+  await requireOwnedUserStory(prisma, id, userId);
+  return prisma.userStoryRevision.findMany({
+    where: { userStoryId: id },
+    orderBy: { revisionNumber: "asc" },
+    include: { changedBy: { select: { id: true, name: true } } },
+  });
 }
 
 export async function createUserStory(projectId: string, userId: string, data: StoryInput) {
@@ -70,6 +85,7 @@ export async function createUserStory(projectId: string, userId: string, data: S
         requirementLinks: requirementIds.length > 0 ? { create: requirementIds.map((requirementId) => ({ requirementId })) } : undefined,
       },
     });
+    await createUserStoryRevision(db, userStory, "CREATED", userId);
     await logActivity(db, {
       projectId,
       actorId: userId,
@@ -84,8 +100,9 @@ export async function createUserStory(projectId: string, userId: string, data: S
 
 export async function updateUserStory(id: string, userId: string, data: StoryUpdate) {
   return prisma.$transaction(async (db) => {
-    const before = await requireOwnedUserStory(db, id, userId);
+    const before = await lockOwnedUserStoryForRevision(db, id, userId);
     const userStory = await db.userStory.update({ where: { id }, data: { ...data, version: { increment: 1 } } });
+    await createUserStoryRevision(db, userStory, "UPDATED", userId);
     await logActivity(db, {
       projectId: userStory.projectId,
       actorId: userId,
@@ -93,7 +110,28 @@ export async function updateUserStory(id: string, userId: string, data: StoryUpd
       entityType: "USER_STORY",
       entityId: id,
       summary: `User Story ${userStory.code} atualizada para a versão ${userStory.version}.`,
-      metadata: { before: { status: before.status, priority: before.priority, version: before.version }, after: { status: userStory.status, priority: userStory.priority, version: userStory.version } },
+      metadata: {
+        before: {
+          title: before.title,
+          actor: before.actor,
+          objective: before.objective,
+          benefit: before.benefit,
+          description: before.description,
+          status: before.status,
+          priority: before.priority,
+          version: before.version,
+        },
+        after: {
+          title: userStory.title,
+          actor: userStory.actor,
+          objective: userStory.objective,
+          benefit: userStory.benefit,
+          description: userStory.description,
+          status: userStory.status,
+          priority: userStory.priority,
+          version: userStory.version,
+        },
+      },
     });
     return userStory;
   });
@@ -138,26 +176,150 @@ export async function unlinkRequirement(userStoryId: string, requirementId: stri
 
 export async function listCriteria(userStoryId: string, userId: string) {
   await requireOwnedUserStory(prisma, userStoryId, userId);
-  return prisma.acceptanceCriterion.findMany({ where: { userStoryId }, orderBy: { position: "asc" } });
+  return prisma.acceptanceCriterion.findMany({ where: { userStoryId, archivedAt: null }, orderBy: { position: "asc" } });
 }
 
 export async function createCriterion(userStoryId: string, userId: string, data: { description: string; position?: number }) {
   return prisma.$transaction(async (db) => {
-    await requireOwnedUserStory(db, userStoryId, userId);
-    return db.acceptanceCriterion.create({ data: { userStoryId, description: data.description, position: data.position ?? (await nextPosition(db, "criterion", userStoryId)) } });
+    const userStory = await lockOwnedUserStoryForRevision(db, userStoryId, userId);
+    const criterion = await db.acceptanceCriterion.create({
+      data: { userStoryId, description: data.description, position: data.position ?? (await nextPosition(db, "criterion", userStoryId)) },
+    });
+    await createAcceptanceCriterionRevision(db, criterion, "CREATED", userId);
+    await logActivity(db, {
+      projectId: userStory.projectId,
+      actorId: userId,
+      action: "CRITERION_CREATED",
+      entityType: "ACCEPTANCE_CRITERION",
+      entityId: criterion.id,
+      summary: `Critério de aceitação ${criterion.position} criado para a User Story ${userStory.code}.`,
+    });
+    return criterion;
   });
 }
 
 export async function updateCriterion(id: string, userId: string, data: { description: string }) {
-  const criterion = await prisma.acceptanceCriterion.findUnique({ where: { id } });
-  if (!criterion) throw notFound("Critério de aceitação");
-  await requireOwnedUserStory(prisma, criterion.userStoryId, userId);
-  return prisma.acceptanceCriterion.update({ where: { id }, data });
+  return prisma.$transaction(async (db) => {
+    const criterion = await lockOwnedCriterionForRevision(db, id, userId);
+    if (criterion.archivedAt) throw conflict("O critério de aceitação já está arquivado.");
+    const updated = await db.acceptanceCriterion.update({ where: { id }, data: { ...data, version: { increment: 1 } } });
+    await createAcceptanceCriterionRevision(db, updated, "UPDATED", userId);
+    const userStory = await db.userStory.findUnique({ where: { id: updated.userStoryId }, select: { projectId: true, code: true } });
+    if (!userStory) throw notFound("User Story");
+    await logActivity(db, {
+      projectId: userStory.projectId,
+      actorId: userId,
+      action: "CRITERION_UPDATED",
+      entityType: "ACCEPTANCE_CRITERION",
+      entityId: updated.id,
+      summary: `Critério de aceitação ${updated.position} atualizado na User Story ${userStory.code}.`,
+    });
+    return updated;
+  });
 }
 
 export async function deleteCriterion(id: string, userId: string) {
-  const criterion = await prisma.acceptanceCriterion.findUnique({ where: { id } });
+  return prisma.$transaction(async (db) => {
+    const criterion = await lockOwnedCriterionForRevision(db, id, userId);
+    if (criterion.archivedAt) throw conflict("O critério de aceitação já está arquivado.");
+    const archived = await db.acceptanceCriterion.update({
+      where: { id },
+      data: { archivedAt: new Date(), version: { increment: 1 } },
+    });
+    await createAcceptanceCriterionRevision(db, archived, "ARCHIVED", userId);
+    const userStory = await db.userStory.findUnique({ where: { id: archived.userStoryId }, select: { projectId: true, code: true } });
+    if (!userStory) throw notFound("User Story");
+    await logActivity(db, {
+      projectId: userStory.projectId,
+      actorId: userId,
+      action: "CRITERION_ARCHIVED",
+      entityType: "ACCEPTANCE_CRITERION",
+      entityId: archived.id,
+      summary: `Critério de aceitação ${archived.position} arquivado na User Story ${userStory.code}.`,
+    });
+  });
+}
+
+export async function getCriterion(id: string, userId: string) {
+  const criterion = await prisma.acceptanceCriterion.findUnique({
+    where: { id },
+    include: {
+      revisions: {
+        orderBy: { revisionNumber: "asc" },
+        include: { changedBy: { select: { id: true, name: true } } },
+      },
+    },
+  });
   if (!criterion) throw notFound("Critério de aceitação");
   await requireOwnedUserStory(prisma, criterion.userStoryId, userId);
-  await prisma.acceptanceCriterion.delete({ where: { id } });
+  return criterion;
+}
+
+export async function listCriterionRevisions(id: string, userId: string) {
+  const criterion = await getCriterion(id, userId);
+  return criterion.revisions;
+}
+
+export async function createUserStoryRevision(
+  db: Prisma.TransactionClient,
+  userStory: Pick<UserStory, "id" | "code" | "title" | "actor" | "objective" | "benefit" | "description" | "priority" | "status" | "version" | "archivedAt" | "generatedByAnalysisId">,
+  operation: RevisionOperation,
+  changedById: string | null,
+) {
+  return db.userStoryRevision.create({
+    data: {
+      userStoryId: userStory.id,
+      revisionNumber: userStory.version,
+      operation,
+      changedById,
+      code: userStory.code,
+      title: userStory.title,
+      actor: userStory.actor,
+      objective: userStory.objective,
+      benefit: userStory.benefit,
+      description: userStory.description,
+      priority: userStory.priority,
+      status: userStory.status,
+      archivedAt: userStory.archivedAt,
+      generatedByAnalysisId: userStory.generatedByAnalysisId,
+    },
+  });
+}
+
+export async function createAcceptanceCriterionRevision(
+  db: Prisma.TransactionClient,
+  criterion: Pick<AcceptanceCriterion, "id" | "userStoryId" | "version" | "description" | "position" | "archivedAt">,
+  operation: RevisionOperation,
+  changedById: string | null,
+) {
+  return db.acceptanceCriterionRevision.create({
+    data: {
+      acceptanceCriterionId: criterion.id,
+      userStoryId: criterion.userStoryId,
+      revisionNumber: criterion.version,
+      operation,
+      changedById,
+      description: criterion.description,
+      position: criterion.position,
+      archivedAt: criterion.archivedAt,
+    },
+  });
+}
+
+async function lockOwnedUserStoryForRevision(db: Prisma.TransactionClient, id: string, userId: string) {
+  await requireOwnedUserStory(db, id, userId);
+  await db.$queryRaw`SELECT "id" FROM "user_stories" WHERE "id" = ${id} FOR UPDATE`;
+  const userStory = await db.userStory.findUnique({ where: { id } });
+  if (!userStory) throw notFound("User Story");
+  return userStory;
+}
+
+async function lockOwnedCriterionForRevision(db: Prisma.TransactionClient, id: string, userId: string) {
+  const existing = await db.acceptanceCriterion.findUnique({ where: { id }, select: { userStoryId: true } });
+  if (!existing) throw notFound("Critério de aceitação");
+  await requireOwnedUserStory(db, existing.userStoryId, userId);
+  await db.$queryRaw`SELECT "id" FROM "acceptance_criteria" WHERE "id" = ${id} FOR UPDATE`;
+  const criterion = await db.acceptanceCriterion.findUnique({ where: { id } });
+  if (!criterion) throw notFound("Critério de aceitação");
+  return criterion;
 }

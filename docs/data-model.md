@@ -18,12 +18,15 @@ Os mocks confirmam que o fluxo real é `Projeto → Sessão → Perguntas/Respos
 | `ElicitationAnswer` | Resposta imutável e versionada de uma pergunta. Mantém respostas anteriores quando o usuário a refina. |
 | `AIAnalysis` | Uma execução de análise futura por IA, com entrada, prompt, resultado e estado. É um histórico de processamento, não uma conversa. |
 | `AIAnalysisSession` | Associação N:N entre análise e sessões: uma análise pode consolidar várias sessões e uma sessão pode participar de várias análises. |
-| `Requirement` | Requisito identificado ou criado manualmente dentro de um projeto. |
+| `Requirement` | Requisito identificado ou criado manualmente dentro de um projeto; seu estado atual é acompanhado por revisões imutáveis. |
+| `RequirementRevision` | Snapshot tipado e imutável de cada estado conhecido de um requisito. |
 | `RequirementAnswerSource` | Associação N:N que preserva quais respostas de elicitação sustentam um requisito. |
 | `RequirementAnalysisSource` | Associação N:N que preserva quais análises de IA geraram ou refinaram um requisito. |
-| `UserStory` | História de usuário de um projeto, estruturada em ator, objetivo e benefício. |
+| `UserStory` | História de usuário de um projeto, estruturada em ator, objetivo e benefício; seu estado atual é acompanhado por revisões imutáveis. |
+| `UserStoryRevision` | Snapshot tipado e imutável de cada estado conhecido de uma User Story. |
 | `RequirementUserStory` | Associação N:N entre requisitos e User Stories. Um requisito pode apoiar mais de uma história, e uma história pode reunir vários requisitos. |
-| `AcceptanceCriterion` | Critério de aceitação ordenado de uma User Story. É entidade própria, não um array de texto. |
+| `AcceptanceCriterion` | Critério de aceitação ordenado de uma User Story, com versionamento e arquivamento lógico. |
+| `AcceptanceCriterionRevision` | Snapshot tipado e imutável de cada estado conhecido de um critério, inclusive seu arquivamento. |
 | `Ambiguity` | Ambiguidade identificada manualmente ou por uma análise, com severidade e resolução. Faz parte do escopo original do TCC. |
 | `Suggestion` | Sugestão gerada ou registrada para um projeto, com decisão de aceite ou descarte. |
 | `ActivityLog` | Registro de atividade e auditoria para o Dashboard e preservação de alterações relevantes. |
@@ -88,6 +91,8 @@ Todos os identificadores são UUIDs, todos os textos de conteúdo usam `TEXT` no
 - `RequirementAnswerSource`: PK composta (`requirementId`, `answerId`) e `createdAt`.
 - `RequirementAnalysisSource`: PK composta (`requirementId`, `analysisId`) e `createdAt`.
 - Essas associações representam corretamente a origem que hoje aparece como texto (“Sessão de elicitação #03”). Um requisito pode resultar de várias respostas e de mais de uma análise; uma resposta/análise pode fundamentar vários requisitos. Na geração inicial, o serviço cria ambos os vínculos para a versão da resposta inicial efetivamente analisada e para a `AIAnalysis` correspondente.
+- `RequirementRevision`: `id` (PK), `requirementId` (FK), `revisionNumber`, `operation`, `changedById` (FK opcional), `code`, `title`, `description`, `type`, `priority`, `status`, `archivedAt` e `createdAt`.
+- `UNIQUE(requirementId, revisionNumber)` garante uma única fotografia recuperável para cada versão. A versão inicial é registrada na criação; toda alteração cria o snapshot completo da nova versão na mesma transação.
 
 ### UserStory, RequirementUserStory e AcceptanceCriterion
 
@@ -95,8 +100,11 @@ Todos os identificadores são UUIDs, todos os textos de conteúdo usam `TEXT` no
 - `UNIQUE(projectId, code)` preserva identificadores como `US-001` dentro do projeto.
 - A frase “Como [ator], quero [objetivo], para [benefício]” é derivada dos três campos e não deve ser duplicada em coluna.
 - `RequirementUserStory`: PK composta (`requirementId`, `userStoryId`), `createdAt`.
-- `AcceptanceCriterion`: `id` (PK), `userStoryId` (FK obrigatória), `position`, `description`, `createdAt`, `updatedAt`; `UNIQUE(userStoryId, position)`.
+- `UserStoryRevision`: `id` (PK), `userStoryId` (FK), `revisionNumber`, `operation`, `changedById` (FK opcional), `code`, `title`, `actor`, `objective`, `benefit`, `description`, `priority`, `status`, `archivedAt`, `generatedByAnalysisId` e `createdAt`.
+- `AcceptanceCriterion`: `id` (PK), `userStoryId` (FK obrigatória), `position`, `description`, `version`, `archivedAt`, `createdAt`, `updatedAt`; `UNIQUE(userStoryId, position)`.
+- `AcceptanceCriterionRevision`: `id` (PK), `acceptanceCriterionId` (FK), `userStoryId` (FK), `revisionNumber`, `operation`, `changedById` (FK opcional), `description`, `position`, `archivedAt` e `createdAt`; `UNIQUE(acceptanceCriterionId, revisionNumber)`.
 - Uma User Story possui `0..N` critérios; um critério pertence a uma única User Story.
+- A exclusão pela API de critérios é um arquivamento lógico: cria uma revisão `ARCHIVED`, mantém o registro e o remove somente das listagens normais e dos insumos de refinamento.
 
 ### Ambiguity e Suggestion
 
@@ -110,6 +118,7 @@ Todos os identificadores são UUIDs, todos os textos de conteúdo usam `TEXT` no
 - Uma atividade sempre pertence a um projeto; o autor pode ser nulo para ações automatizadas do sistema ou da IA.
 - `entityId` é uma referência de auditoria polimórfica, deliberadamente sem FK. A integridade do dado principal fica nas relações próprias; o log precisa sobreviver mesmo quando o item estiver arquivado.
 - Em atualizações relevantes, `metadata` guarda snapshots mínimo de antes/depois, sem incluir credenciais ou dados que não sejam necessários ao histórico.
+- `ActivityLog` é operacional, voltado ao Dashboard. Ele não substitui as entidades de revisão, que são a fonte canônica para recuperar uma versão completa de requisito, User Story ou critério.
 
 ## Enums
 
@@ -126,8 +135,9 @@ Todos os identificadores são UUIDs, todos os textos de conteúdo usam `TEXT` no
 | `AmbiguitySeverity` | `LOW`, `MEDIUM`, `HIGH` |
 | `AmbiguityStatus` | `OPEN`, `RESOLVED`, `DISMISSED` |
 | `SuggestionStatus` | `PENDING`, `ACCEPTED`, `DISMISSED` |
-| `ActivityAction` | `PROJECT_CREATED`, `PROJECT_UPDATED`, `PROJECT_ARCHIVED`, `SESSION_STARTED`, `SESSION_COMPLETED`, `QUESTION_ADDED`, `ANSWER_RECORDED`, `ANALYSIS_COMPLETED`, `REQUIREMENT_CREATED`, `REQUIREMENT_UPDATED`, `STORY_CREATED`, `STORY_UPDATED` |
-| `ActivityEntityType` | `PROJECT`, `SESSION`, `QUESTION`, `ANSWER`, `ANALYSIS`, `REQUIREMENT`, `USER_STORY`, `AMBIGUITY`, `SUGGESTION` |
+| `RevisionOperation` | `BASELINE`, `CREATED`, `UPDATED`, `ARCHIVED` |
+| `ActivityAction` | `PROJECT_CREATED`, `PROJECT_UPDATED`, `PROJECT_ARCHIVED`, `SESSION_STARTED`, `SESSION_COMPLETED`, `QUESTION_ADDED`, `ANSWER_RECORDED`, `ANALYSIS_COMPLETED`, `REQUIREMENT_CREATED`, `REQUIREMENT_UPDATED`, `STORY_CREATED`, `STORY_UPDATED`, `CRITERION_CREATED`, `CRITERION_UPDATED`, `CRITERION_ARCHIVED` |
+| `ActivityEntityType` | `PROJECT`, `SESSION`, `QUESTION`, `ANSWER`, `ANALYSIS`, `REQUIREMENT`, `USER_STORY`, `ACCEPTANCE_CRITERION`, `AMBIGUITY`, `SUGGESTION` |
 
 Os rótulos exibidos na interface devem ser mapeados desses valores; por exemplo, `IN_REVIEW` é apresentado como “Em revisão”.
 
@@ -160,9 +170,9 @@ Busca textual por nome de projeto, requisito e história pode começar com `ILIK
 
 - A exclusão normal de projetos é **arquivamento lógico** (`status = ARCHIVED`, `archivedAt`), pois o TCC precisa preservar a história da elicitação. Não há exclusão física pelo fluxo da interface.
 - FKs de agregados principais usam `onDelete: Restrict`: um projeto não pode ser removido fisicamente enquanto possuir dados; sessão, pergunta, resposta, requisito, User Story, análise, ambiguidade e sugestão também não são apagados por rotina.
-- `AcceptanceCriterion` e tabelas associativas podem usar `onDelete: Cascade` apenas em uma remoção física administrativa já autorizada, pois não têm significado fora do pai.
+- `AcceptanceCriterion` é arquivado logicamente no fluxo normal. As revisões usam `onDelete: Cascade` apenas como proteção para uma remoção física administrativa, que não é exposta pela aplicação.
 - FKs opcionais para usuário ou análise usam `onDelete: SetNull` quando a referência é de autoria/origem complementar. O histórico textual e o snapshot permanecem.
-- IDs, códigos, sequência de sessão e versões de respostas são imutáveis. Alterações em requisito/User Story devem incrementar `version`, atualizar `updatedAt` e gerar `ActivityLog` em uma única transação.
+- IDs, códigos, sequência de sessão e versões de respostas são imutáveis. Alterações em requisito, User Story e critério incrementam a versão corrente, atualizam o estado e criam uma revisão completa na mesma transação, com bloqueio de linha para evitar números duplicados em edições concorrentes.
 
 ## Estratégia de histórico e rastreabilidade
 
@@ -171,7 +181,10 @@ Busca textual por nome de projeto, requisito e história pode começar com `ILIK
 3. `AIAnalysis` é imutável depois de concluída e guarda o snapshot de entrada, prompt, versão de prompt, modelo, saída e estado do processamento.
 4. As tabelas `RequirementAnswerSource` e `RequirementAnalysisSource` explicitam a evidência que levou a cada requisito. Isso permite explicar um requisito sem depender de texto livre de origem.
 5. `RequirementUserStory` permite navegar de uma necessidade a uma história e vice-versa, sem limitar o modelo a um único vínculo.
-6. `ActivityLog` registra criação, atualização, conclusão e arquivamento. Para alterações importantes, `metadata` armazena somente o snapshot necessário de antes/depois.
+6. `ActivityLog` registra criação, atualização, conclusão e arquivamento como atividade operacional. Para alterações importantes, `metadata` armazena somente o contexto necessário de antes/depois.
+7. `RequirementRevision`, `UserStoryRevision` e `AcceptanceCriterionRevision` são append-only. Cada linha contém o snapshot tipado completo de uma versão e pode ser recuperada sem reproduzir eventos anteriores.
+8. A migration `20261014003323_immutable_artifact_revisions` criou um baseline por artefato existente com a operação `BASELINE`. O baseline representa somente o estado conhecido na implantação: versões anteriores sem snapshot não são inventadas.
+9. A composição N:N de `RequirementUserStory` continua com histórico operacional no `ActivityLog`, mas este item não introduz uma tabela temporal para cada vínculo criado ou removido. A origem por `AIAnalysis` e por resposta de elicitação permanece preservada nas relações já existentes.
 
 ## Diagrama textual
 
@@ -183,10 +196,13 @@ Project 1 ── N AIAnalysis N ── N ElicitationSession        (AIAnalysisSe
 AIAnalysis 1 ── N ElicitationQuestion                     (origem opcional de pergunta por IA)
 
 Project 1 ── N Requirement
+Requirement 1 ── N RequirementRevision
 Requirement N ── N ElicitationAnswer                      (RequirementAnswerSource)
 Requirement N ── N AIAnalysis                             (RequirementAnalysisSource)
 Requirement N ── N UserStory                              (RequirementUserStory)
 Project 1 ── N UserStory 1 ── N AcceptanceCriterion
+UserStory 1 ── N UserStoryRevision
+AcceptanceCriterion 1 ── N AcceptanceCriterionRevision
 
 Project 1 ── N Ambiguity       N ── 0..1 AIAnalysis
 Project 1 ── N Suggestion      N ── 0..1 AIAnalysis
@@ -195,7 +211,7 @@ Project 1 ── N ActivityLog     N ── 0..1 User
 
 ## Implementação em `schema.prisma`
 
-O bloco abaixo corresponde ao schema implementado em `prisma/schema.prisma`. A versão do Prisma ORM utilizada é `7.10.0`. Ele foi validado com `prisma validate` e aplicado ao PostgreSQL de desenvolvimento pela migration `20260908002456_init_domain_model`.
+O bloco abaixo corresponde ao schema implementado em `prisma/schema.prisma`. A versão do Prisma ORM utilizada é `7.10.0`. Ele foi validado com `prisma validate` e aplicado ao PostgreSQL de desenvolvimento pelas migrations `20260908002456_init_domain_model` e `20261014003323_immutable_artifact_revisions`.
 
 ```prisma
 generator client {
@@ -218,8 +234,9 @@ enum AIAnalysisStatus { PENDING RUNNING SUCCEEDED FAILED INVALID_RESPONSE CANCEL
 enum AmbiguitySeverity { LOW MEDIUM HIGH }
 enum AmbiguityStatus { OPEN RESOLVED DISMISSED }
 enum SuggestionStatus { PENDING ACCEPTED DISMISSED }
-enum ActivityAction { PROJECT_CREATED PROJECT_UPDATED PROJECT_ARCHIVED SESSION_STARTED SESSION_COMPLETED QUESTION_ADDED ANSWER_RECORDED ANALYSIS_COMPLETED REQUIREMENT_CREATED REQUIREMENT_UPDATED STORY_CREATED STORY_UPDATED }
-enum ActivityEntityType { PROJECT SESSION QUESTION ANSWER ANALYSIS REQUIREMENT USER_STORY AMBIGUITY SUGGESTION }
+enum RevisionOperation { BASELINE CREATED UPDATED ARCHIVED }
+enum ActivityAction { PROJECT_CREATED PROJECT_UPDATED PROJECT_ARCHIVED SESSION_STARTED SESSION_COMPLETED QUESTION_ADDED ANSWER_RECORDED ANALYSIS_COMPLETED REQUIREMENT_CREATED REQUIREMENT_UPDATED STORY_CREATED STORY_UPDATED CRITERION_CREATED CRITERION_UPDATED CRITERION_ARCHIVED }
+enum ActivityEntityType { PROJECT SESSION QUESTION ANSWER ANALYSIS REQUIREMENT USER_STORY ACCEPTANCE_CRITERION AMBIGUITY SUGGESTION }
 
 model User {
   id                  String               @id @default(uuid()) @db.Uuid
@@ -233,6 +250,9 @@ model User {
   answers             ElicitationAnswer[]
   createdRequirements Requirement[]        @relation("RequirementCreator")
   createdUserStories  UserStory[]          @relation("UserStoryCreator")
+  changedRequirementRevisions RequirementRevision[] @relation("RequirementRevisionAuthor")
+  changedUserStoryRevisions UserStoryRevision[] @relation("UserStoryRevisionAuthor")
+  changedAcceptanceCriterionRevisions AcceptanceCriterionRevision[] @relation("AcceptanceCriterionRevisionAuthor")
   requestedAnalyses   AIAnalysis[]         @relation("AnalysisRequester")
   resolvedAmbiguities Ambiguity[]          @relation("AmbiguityResolver")
   decidedSuggestions  Suggestion[]         @relation("SuggestionDecider")
@@ -387,10 +407,32 @@ model Requirement {
   answerSources RequirementAnswerSource[]
   analysisSources RequirementAnalysisSource[]
   userStoryLinks RequirementUserStory[]
+  revisions RequirementRevision[]
   @@unique([projectId, code])
   @@index([projectId, status, priority])
   @@index([projectId, type])
   @@map("requirements")
+}
+
+model RequirementRevision {
+  id             String            @id @default(uuid()) @db.Uuid
+  requirementId  String            @map("requirement_id") @db.Uuid
+  revisionNumber Int               @map("revision_number")
+  operation      RevisionOperation
+  changedById    String?           @map("changed_by_id") @db.Uuid
+  code           String
+  title          String
+  description    String            @db.Text
+  type           RequirementType
+  priority       Priority
+  status         ReviewStatus
+  archivedAt     DateTime?         @map("archived_at")
+  createdAt      DateTime          @default(now()) @map("created_at")
+  requirement    Requirement       @relation(fields: [requirementId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  changedBy      User?             @relation("RequirementRevisionAuthor", fields: [changedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  @@unique([requirementId, revisionNumber])
+  @@index([requirementId, createdAt])
+  @@map("requirement_revisions")
 }
 
 model RequirementAnswerSource {
@@ -437,9 +479,35 @@ model UserStory {
   generatedByAnalysis   AIAnalysis?            @relation("GeneratedUserStories", fields: [generatedByAnalysisId], references: [id], onDelete: SetNull, onUpdate: Cascade)
   requirementLinks      RequirementUserStory[]
   acceptanceCriteria    AcceptanceCriterion[]
+  acceptanceCriterionRevisions AcceptanceCriterionRevision[]
+  revisions             UserStoryRevision[]
   @@unique([projectId, code])
   @@index([projectId, status, priority])
   @@map("user_stories")
+}
+
+model UserStoryRevision {
+  id                    String            @id @default(uuid()) @db.Uuid
+  userStoryId           String            @map("user_story_id") @db.Uuid
+  revisionNumber        Int               @map("revision_number")
+  operation             RevisionOperation
+  changedById           String?           @map("changed_by_id") @db.Uuid
+  code                  String
+  title                 String
+  actor                 String
+  objective             String            @db.Text
+  benefit               String            @db.Text
+  description           String?           @db.Text
+  priority              Priority
+  status                ReviewStatus
+  archivedAt            DateTime?         @map("archived_at")
+  generatedByAnalysisId String?           @map("generated_by_analysis_id") @db.Uuid
+  createdAt             DateTime          @default(now()) @map("created_at")
+  userStory             UserStory         @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  changedBy             User?             @relation("UserStoryRevisionAuthor", fields: [changedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  @@unique([userStoryId, revisionNumber])
+  @@index([userStoryId, createdAt])
+  @@map("user_story_revisions")
 }
 
 model RequirementUserStory {
@@ -458,11 +526,34 @@ model AcceptanceCriterion {
   userStoryId String    @map("user_story_id") @db.Uuid
   position    Int
   description String    @db.Text
+  version     Int       @default(1)
+  archivedAt  DateTime? @map("archived_at")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
   userStory   UserStory @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  revisions   AcceptanceCriterionRevision[]
   @@unique([userStoryId, position])
   @@map("acceptance_criteria")
+}
+
+model AcceptanceCriterionRevision {
+  id                    String              @id @default(uuid()) @db.Uuid
+  acceptanceCriterionId String              @map("acceptance_criterion_id") @db.Uuid
+  userStoryId           String              @map("user_story_id") @db.Uuid
+  revisionNumber        Int                 @map("revision_number")
+  operation             RevisionOperation
+  changedById           String?             @map("changed_by_id") @db.Uuid
+  description           String              @db.Text
+  position              Int
+  archivedAt            DateTime?           @map("archived_at")
+  createdAt             DateTime            @default(now()) @map("created_at")
+  acceptanceCriterion   AcceptanceCriterion @relation(fields: [acceptanceCriterionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  userStory             UserStory           @relation(fields: [userStoryId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  changedBy             User?               @relation("AcceptanceCriterionRevisionAuthor", fields: [changedById], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  @@unique([acceptanceCriterionId, revisionNumber])
+  @@index([acceptanceCriterionId, createdAt])
+  @@index([userStoryId, createdAt])
+  @@map("acceptance_criterion_revisions")
 }
 
 model Ambiguity {
@@ -520,9 +611,10 @@ model ActivityLog {
 
 ## Estado da implementação e limites da etapa
 
-- O repositório possui `prisma/schema.prisma`, `prisma.config.ts`, a migration `20260908002456_init_domain_model`, scripts de banco no `package.json` e `prisma/seed.ts`. A URL continua exclusivamente em `.env`, que é ignorado pelo Git; `.env.example` contém somente placeholders.
-- PostgreSQL está disponível no ambiente de desenvolvimento, a migration foi aplicada e o seed de desenvolvimento foi executado. A conexão é validada com `npm run db:validate` e `npx prisma migrate status`.
+- O repositório possui `prisma/schema.prisma`, `prisma.config.ts`, as migrations `20260908002456_init_domain_model` e `20261014003323_immutable_artifact_revisions`, scripts de banco no `package.json` e `prisma/seed.ts`. A URL continua exclusivamente em `.env`, que é ignorado pelo Git; `.env.example` contém somente placeholders.
+- PostgreSQL está disponível no ambiente de desenvolvimento, as migrations foram aplicadas e a conexão é validada com `npm run db:validate` e `npx prisma migrate status`.
 - As Fases 5 e 6 adicionaram rotas HTTP, validação de payloads, serviços de persistência, autenticação por senha com hash e autorização por proprietário. Projetos, detalhe de projeto, elicitação, requisitos e User Stories consomem a API local sob sessão autenticada.
 - As Fases 7 e 8 usam `AIAnalysis` sem alterar o schema físico: cada análise cria um registro por execução, associa exatamente uma sessão, preserva `inputSnapshot`, `promptText`, `promptVersion`, provider, modelo, status e a saída Zod-validada em `structuredOutput`. A geração de requisitos da Fase 8 vincula cada `Requirement` por `RequirementAnalysisSource`, a `UserStory` por `generatedByAnalysisId`, seus critérios por `AcceptanceCriterion` e todos os requisitos à User Story por `RequirementUserStory`. Falhas controladas preservam somente `errorCode`; chaves e payloads brutos desnecessários não são armazenados.
 - O início guiado da elicitação usa as entidades já previstas: cria uma `ElicitationSession` ativa, armazena a descrição em `context`, cria uma `ElicitationQuestion` de template na posição 1 e registra a mesma entrada como `ElicitationAnswer` versão 1. O contexto facilita a identificação da sessão; a resposta preserva a entrada original no histórico imutável. Não há nova tabela, campo ou migration.
+- O Item 5 da Fase 12.1 introduziu revisões imutáveis para requisitos, User Stories e critérios. Criações manuais e por IA produzem a revisão `CREATED`; edições produzem `UPDATED`; a remoção de critério produz `ARCHIVED`. As revisões podem ser consultadas pelos serviços autenticados de cada artefato. Não existe tela de histórico nesta etapa.
 - Migrations posteriores somente devem ser criadas após aprovação explícita de mudança no modelo. Para reproduzir o banco, configure `DATABASE_URL`, execute `npm run db:migrate` e `npm run db:seed`.
