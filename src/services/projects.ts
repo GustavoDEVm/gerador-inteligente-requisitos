@@ -8,9 +8,10 @@ type CreateProjectInput = {
   objective: string;
   context: string;
   status?: "ACTIVE" | "IN_REVIEW" | "COMPLETED" | "ARCHIVED";
+  stakeholders?: Array<{ name: string; role?: string }>;
 };
 
-type UpdateProjectInput = Partial<CreateProjectInput>;
+type UpdateProjectInput = Partial<Omit<CreateProjectInput, "stakeholders">>;
 
 export async function listProjects(ownerId: string, filters?: { status?: CreateProjectInput["status"]; includeArchived?: boolean }) {
   return prisma.project.findMany({
@@ -56,7 +57,14 @@ export async function getProject(id: string, userId: string) {
 export async function createProject(ownerId: string, data: CreateProjectInput) {
   return prisma.$transaction(async (db) => {
     await requireUser(db, ownerId);
-    const project = await db.project.create({ data: { ...data, ownerId } });
+    const { stakeholders, ...projectData } = data;
+    const project = await db.project.create({
+      data: {
+        ...projectData,
+        ownerId,
+        ...(stakeholders?.length ? { stakeholders: { create: stakeholders } } : {}),
+      },
+    });
     await logActivity(db, {
       projectId: project.id,
       actorId: ownerId,

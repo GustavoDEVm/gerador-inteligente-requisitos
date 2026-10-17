@@ -37,12 +37,15 @@ export const loginSchema = z.object({
   password: z.string().min(1, "Informe a senha.").max(128, "A senha é muito longa."),
 });
 
+const createStakeholderInputSchema = z.object({ name: text("O nome", 160), role: optionalText(160) });
+
 export const createProjectSchema = z.object({
   name: text("O nome", 160),
   description: text("A descrição"),
   objective: text("O objetivo"),
   context: text("O contexto"),
   status: z.enum(projectStatuses).optional(),
+  stakeholders: z.array(createStakeholderInputSchema).optional(),
 });
 
 export const listProjectsQuerySchema = z.object({
@@ -62,7 +65,7 @@ export const updateProjectSchema = z
 
 export const archiveProjectSchema = z.object({});
 
-export const createStakeholderSchema = z.object({ name: text("O nome", 160), role: optionalText(160) });
+export const createStakeholderSchema = createStakeholderInputSchema;
 export const updateStakeholderSchema = z
   .object({ name: text("O nome", 160).optional(), role: optionalText(160).nullable() })
   .refine(hasUpdateValue, "Informe ao menos um campo para atualizar.");

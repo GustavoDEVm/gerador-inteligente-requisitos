@@ -43,9 +43,17 @@ export function NewProjectForm() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const project = await apiFetch<{ id: string }>("/api/projects", { method: "POST", body: JSON.stringify({ name: form.name, description: form.description, objective: form.objective, context: form.context }) });
       const stakeholders = form.stakeholders.split(",").map((item) => item.trim()).filter(Boolean);
-      await Promise.all(stakeholders.map((name) => apiFetch(`/api/projects/${project.id}/stakeholders`, { method: "POST", body: JSON.stringify({ name }) })));
+      const project = await apiFetch<{ id: string }>("/api/projects", {
+        method: "POST",
+        body: JSON.stringify({
+          name: form.name,
+          description: form.description,
+          objective: form.objective,
+          context: form.context,
+          stakeholders: stakeholders.map((name) => ({ name })),
+        }),
+      });
       setCreatedProjectId(project.id);
       setCreated(true);
     } catch (requestError) {
@@ -70,7 +78,7 @@ export function NewProjectForm() {
         </form>
       </Card>
       <Dialog open={created} onClose={() => setCreated(false)} title="Projeto criado">
-        <p className="text-sm leading-6 text-slate-600">O projeto e seus stakeholders foram registrados na camada de persistência de desenvolvimento.</p>
+        <p className="text-sm leading-6 text-slate-600">O projeto e seus stakeholders foram registrados.</p>
         <div className="mt-5 flex justify-end">{createdProjectId && <Button href={`/projetos/${createdProjectId}`} onClick={() => setCreated(false)}>Ver projeto</Button>}</div>
       </Dialog>
     </>
