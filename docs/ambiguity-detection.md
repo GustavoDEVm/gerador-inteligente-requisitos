@@ -2,7 +2,7 @@
 
 ## Escopo
 
-A Fase 9 adiciona a detecção estruturada de ambiguidades a partir da resposta inicial já persistida em uma sessão de elicitação. Ela não cria perguntas de esclarecimento, não executa refinamento e não modifica a geração de requisitos `requirements-v2`.
+A detecção de ambiguidades adiciona uma análise estruturada a partir da resposta inicial já persistida em uma sessão de elicitação. Isoladamente, essa operação não cria perguntas de esclarecimento, não executa refinamento e não modifica a geração de requisitos `requirements-v2`; essas etapas são executadas por operações de IA próprias.
 
 ```text
 ElicitationAnswer (última versão da pergunta inicial)
@@ -58,11 +58,13 @@ O modelo atual não possui uma coluna de contexto por ambiguidade. O contexto in
 
 Uma nova execução nunca remove ou sobrescreve análises e ambiguidades anteriores. Para impedir repetição dentro da mesma execução, o serviço descarta apenas descrições equivalentes da resposta atual após normalizar espaços e caixa. Ele não compara execuções anteriores, preservando o histórico.
 
+Antes de criar a análise, `AIService` bloqueia a linha da sessão em uma transação curta e verifica se já existe uma análise `AMBIGUITY_DETECTION` da mesma sessão nos estados `PENDING` ou `RUNNING`. Nesse caso, a nova requisição recebe `409 CONFLICT`, sem chamar o provider nem criar ambiguidades duplicadas. Análises ativas do mesmo tipo iniciadas há mais de três minutos são preservadas e marcadas como `FAILED` com o código `AI_OPERATION_ABANDONED`, permitindo uma nova tentativa sem apagar histórico.
+
 ## Providers
 
 `AIProvider` já define uma única operação genérica de Structured Output. A detecção usa `metadata.operation = "detect-ambiguities"`, portanto não cria um segundo mecanismo de comunicação.
 
-- `GeminiProvider` apenas transporta a solicitação genérica, o prompt e o JSON Schema ao SDK existente. O timeout permanece em 30 segundos e o retry continua limitado exclusivamente à geração de requisitos; a detecção não adiciona retry.
+- `GeminiProvider` apenas transporta a solicitação genérica, o prompt e o JSON Schema ao SDK existente. O timeout permanece em 30 segundos. Para `detect-ambiguities`, uma primeira falha HTTP `503` transitória reconhecida pelo provider recebe somente uma segunda tentativa após um segundo; não há terceira tentativa nem retry para timeout, TLS, erros `4xx`, resposta inválida ou falhas de persistência.
 - `MockAIProvider` não usa rede, SDK Gemini ou variáveis Gemini. Para uma entrada comum, retorna três ambiguidades determinísticas, uma para cada severidade. Entradas que contenham `sem ambiguidades` ou `requisitos completos` retornam uma lista vazia, permitindo validar os dois cenários localmente.
 
 ## Interface e teste manual

@@ -1,4 +1,4 @@
-# Arquitetura inicial
+# Arquitetura
 
 ## Decisão
 
@@ -6,7 +6,7 @@ Adotar Next.js com App Router como interface e backend inicial, organizado como 
 
 ## Camadas
 
-| Camada | Responsabilidade | Local futuro |
+| Camada | Responsabilidade | Localização |
 | --- | --- | --- |
 | Apresentação | Páginas, layouts e componentes de UI | `src/app`, `src/components` |
 | API | Receber requisições HTTP, validar contratos e mapear respostas | `src/app/api` |
@@ -16,15 +16,17 @@ Adotar Next.js com App Router como interface e backend inicial, organizado como 
 
 ## Contrato da IA
 
-As respostas do modelo são solicitadas em JSON estruturado e validadas com Zod no backend antes do uso. A análise inicial da Fase 7 entrega resumo, User Story inicial, observações, ambiguidades e sugestões. A geração da Fase 8 entrega User Story, requisitos funcionais/não funcionais e critérios de aceitação, com persistência e rastreabilidade. Perguntas, refinamento e edição permanecem fora desta fase. A implementação concreta inicial é Gemini, isolada atrás da interface `AIProvider` para que as regras de negócio não dependam do SDK.
+As respostas do modelo são solicitadas em JSON estruturado e validadas com Zod no backend antes do uso. A análise inicial entrega resumo, User Story inicial, observações, ambiguidades e sugestões. A geração de requisitos e o refinamento geram User Story, requisitos funcionais e não funcionais e critérios de aceitação, com persistência e rastreabilidade. A aplicação também detecta ambiguidades e gera perguntas de refinamento associadas a elas. Edições manuais de requisitos, User Stories e critérios de aceitação preservam revisões imutáveis.
+
+`AIProvider` mantém as regras de negócio independentes do SDK. Em execução, `AI_PROVIDER=gemini` seleciona `GeminiProvider` e `AI_PROVIDER=mock` seleciona `MockAIProvider`, determinístico e sem acesso à rede, adequado para desenvolvimento e testes.
 
 ## Segurança
 
-A interface chama somente as rotas do próprio sistema. Apenas o servidor acessará as variáveis de ambiente e o provedor de IA. As entradas do usuário e saídas do modelo serão validadas no limite da API.
+A interface chama somente as rotas do próprio sistema. Apenas o servidor acessa as variáveis de ambiente e o provedor de IA. As entradas do usuário e saídas do modelo são validadas no limite da API.
 
 ## Implementação — Fase 6
 
-A interface usa App Router e componentes reutilizáveis em `src/components`. As telas de Projetos, detalhe de projeto, Elicitação, Requisitos e User Stories chamam exclusivamente as Route Handlers locais, que acessam PostgreSQL por meio do Prisma. Dashboard e Configurações continuam usando dados de apresentação/mocks até suas respectivas fases.
+A interface usa App Router e componentes reutilizáveis em `src/components`. As telas de Projetos, detalhe de projeto, Elicitação, Requisitos e User Stories chamam exclusivamente as Route Handlers locais, que acessam PostgreSQL por meio do Prisma. O Dashboard consulta projetos e atividades persistidos pelas APIs; quando esses dados não estão disponíveis, apresenta estado neutro em vez de métricas fictícias. A tela de Configurações informa os recursos de persistência e IA já disponíveis no ambiente.
 
 `src/lib/prisma.ts` concentra o Prisma Client com o adaptador PostgreSQL e lê `DATABASE_URL` apenas no servidor. `src/lib/api` centraliza parsing JSON, validação Zod, envelopes HTTP e mapeamento seguro de erros. `src/services` contém as operações de domínio e transações.
 
@@ -53,6 +55,7 @@ O sistema usa autenticação por credenciais sem um provedor externo. A senha é
 | `/api/requirements` | listar/criar por projeto, consultar e atualizar requisito |
 | `/api/user-stories`, `/api/acceptance-criteria` | criar/atualizar User Stories, relacionar requisitos e gerenciar critérios |
 | `/api/ambiguities`, `/api/suggestions` | listar/criar por projeto e atualizar decisão/resolução |
+| `/api/ai/analyze`, `/api/ai/generate-requirements`, `/api/ai/detect-ambiguities`, `/api/ai/generate-refinement-questions`, `/api/ai/refine-requirements` | análise inicial, geração e refinamento de requisitos, detecção de ambiguidades e geração de perguntas de refinamento |
 
 As respostas seguem o envelope `{ "data": ... }` em sucesso e `{ "error": { "code", "message" } }` em falhas. Entradas inválidas retornam `400`, sessão ausente retorna `401`, acesso a recurso de outro proprietário retorna `403`, registros ausentes retornam `404`, conflitos de unicidade/associação retornam `409` e falhas inesperadas retornam mensagem genérica `500`. Respostas de elicitação não possuem operação de atualização: um novo `POST` cria a próxima versão.
 
@@ -69,9 +72,9 @@ AIService (autorização, persistência e orquestração)
         ↓
 AIProvider (contrato independente de fornecedor)
         ↓
-GeminiProvider (@google/genai)
+Provider configurado (`GeminiProvider` ou `MockAIProvider`)
         ↓
-Gemini API com JSON Schema
+Structured Output (Gemini API ou resposta determinística do Mock)
         ↓
 Zod no servidor
         ↓
@@ -97,7 +100,7 @@ AIService (autorização, orquestração e transação)
         ↓
 AIProvider configurado (Mock ou Gemini)
         ↓
-Prompt requirements-v1 + JSON Schema + Zod
+Prompt requirements-v2 + JSON Schema + Zod
         ↓
 AIAnalysis + UserStory + Requirement + AcceptanceCriterion
         ↓
@@ -113,3 +116,15 @@ Os códigos enviados pelo modelo são validados como `RF-001` e `RNF-001`, mas a
 `POST /api/ai/refine-requirements` reutiliza a mesma separação Route Handler → `AIService` → `AIProvider`, mas cria uma análise independente do tipo `REFINEMENT`. O serviço recupera no servidor a resposta inicial, somente as perguntas da execução de refinamento atual, suas respostas mais recentes e os artefatos da geração anterior. A saída usa o mesmo schema Zod reduzido de requisitos e é persistida como uma nova User Story, novos requisitos e novos critérios.
 
 Os relacionamentos já existentes associam os requisitos novos tanto à análise `REFINEMENT` quanto a todas as versões de resposta usadas como fonte. Nenhum requisito ou artefato anterior é atualizado, e não há migration. A interface libera o refinamento apenas quando todas as perguntas atuais foram respondidas e apresenta o resultado como nova versão. Consulte `docs/requirements-refinement.md` para o contrato e a rastreabilidade.
+
+## Coordenação de operações de IA
+
+Antes de criar uma `AIAnalysis`, `AIService` abre uma transação curta, bloqueia a linha da `ElicitationSession` no PostgreSQL e verifica análises do mesmo tipo, da mesma sessão, nos estados `PENDING` ou `RUNNING`. Uma operação equivalente em andamento recebe `409 CONFLICT`; a chamada ao provider ocorre somente depois que a transação de criação termina. Assim, requisições concorrentes não persistem artefatos duplicados, enquanto uma nova execução é permitida depois de a anterior terminar ou falhar.
+
+Para evitar bloqueio permanente após queda do processo, uma análise ativa do mesmo tipo, sessão e projeto com início há mais de três minutos é marcada como `FAILED`, com o código `AI_OPERATION_ABANDONED`, preservando seu histórico. A recuperação é feita sob o mesmo lock e não remove análises nem artefatos anteriores.
+
+## Histórico e reidratação
+
+As análises de requisitos, ambiguidades, perguntas e refinamentos são persistidas em `AIAnalysis` e vinculadas à sessão. No carregamento da sessão, o backend determina o conjunto relevante de perguntas: após um refinamento bem-sucedido, usa a geração de perguntas referenciada no `inputSnapshot` dessa análise; caso contrário, usa a geração de perguntas mais recente. A interface reidrata análises, perguntas e respostas persistidas sem executar a IA ou criar artefatos no reload.
+
+Requisitos, User Stories e critérios de aceitação possuem revisões imutáveis. As operações de criação e atualização dos três artefatos, além do arquivamento lógico de critérios, registram um snapshot completo em `RequirementRevision`, `UserStoryRevision` ou `AcceptanceCriterionRevision` dentro da mesma transação da alteração. As associações com `AIAnalysis` e as versões de respostas de elicitação permanecem preservadas para rastreabilidade.
