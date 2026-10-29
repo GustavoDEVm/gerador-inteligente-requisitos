@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "../../generated/prisma/client";
 import { notFound } from "@/lib/api/errors";
 import { logActivity, nextPosition, requireOwnedProject, requireOwnedQuestion, requireOwnedSession, requireUser } from "@/services/shared";
 
@@ -289,7 +290,7 @@ export async function listAnswers(questionId: string, userId: string) {
 
 export async function appendAnswer(questionId: string, userId: string, data: { content: string }) {
   return prisma.$transaction(async (db) => {
-    const question = await requireOwnedQuestion(db, questionId, userId);
+    const question = await lockOwnedQuestionForAnswer(db, questionId, userId);
     await requireUser(db, userId);
     const latest = await db.elicitationAnswer.findFirst({ where: { questionId }, orderBy: { version: "desc" }, select: { version: true } });
     const answer = await db.elicitationAnswer.create({ data: { ...data, questionId, authorId: userId, version: (latest?.version ?? 0) + 1 } });
@@ -305,4 +306,12 @@ export async function appendAnswer(questionId: string, userId: string, data: { c
     });
     return answer;
   });
+}
+
+async function lockOwnedQuestionForAnswer(db: Prisma.TransactionClient, questionId: string, userId: string) {
+  await requireOwnedQuestion(db, questionId, userId);
+  await db.$queryRaw`SELECT "id" FROM "elicitation_questions" WHERE "id" = ${questionId} FOR UPDATE`;
+  const question = await db.elicitationQuestion.findUnique({ where: { id: questionId } });
+  if (!question) throw notFound("Pergunta de elicitação");
+  return question;
 }
