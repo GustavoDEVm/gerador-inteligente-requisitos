@@ -25,6 +25,7 @@ type SessionItem = {
   sequence: number;
   title: string | null;
   status: "DRAFT" | "ACTIVE" | "COMPLETED" | "CANCELLED";
+  createdAt: string;
 };
 
 type QuestionItem = {
@@ -34,6 +35,7 @@ type QuestionItem = {
   guidance: string | null;
   source: "MANUAL" | "TEMPLATE" | "AI";
   generatedByAnalysis: { id: string; structuredOutput: unknown } | null;
+  suggestedAnswer?: string;
   answers: { id: string; version: number; content: string }[];
 };
 
@@ -48,20 +50,34 @@ type PersistedSessionAnalysis = {
 };
 
 type SessionDetails = {
+  id: string;
+  title: string | null;
+  context: string;
+  status: SessionItem["status"];
   analyses: { analysis: PersistedSessionAnalysis }[];
 };
 
-export function ElicitationSession({ initialProjectId }: { initialProjectId?: string }) {
+export function ElicitationSession({
+  initialProjectId,
+  initialSessionId,
+  startNewSession = false,
+}: {
+  initialProjectId?: string;
+  initialSessionId?: string;
+  startNewSession?: boolean;
+}) {
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [projectId, setProjectId] = useState("");
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionId, setSessionId] = useState("");
+  const [sessionReloadKey, setSessionReloadKey] = useState(0);
   const [questions, setQuestions] = useState<QuestionItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answer, setAnswer] = useState("");
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [sessionTitle, setSessionTitle] = useState("");
   const [initialDescription, setInitialDescription] = useState("");
+  const [creatingNewSession, setCreatingNewSession] = useState(startNewSession);
   const [finished, setFinished] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -101,13 +117,19 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
       .then((items) => {
         if (!active) return;
         setSessions(items);
-        setSessionId(items.find((item) => item.status === "ACTIVE")?.id ?? items[0]?.id ?? "");
+        const requestedSessionExists = !startNewSession && Boolean(initialSessionId) && items.some((item) => item.id === initialSessionId);
+        setSessionId(startNewSession
+          ? ""
+          : requestedSessionExists
+            ? initialSessionId ?? ""
+            : items.find((item) => item.status === "ACTIVE")?.id ?? items[0]?.id ?? "");
+        setCreatingNewSession(startNewSession);
       })
       .catch((requestError: unknown) => {
         if (active) setError(requestError instanceof Error ? requestError.message : "Não foi possível carregar as sessões.");
       });
     return () => { active = false; };
-  }, [projectId]);
+  }, [initialSessionId, projectId, startNewSession]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -129,6 +151,10 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
         );
         const rehydratedResults = rehydratePersistedAnalysisResults(session.analyses.map((item) => item.analysis));
         setQuestions(items);
+        if (session.status === "DRAFT") {
+          setSessionTitle(session.title ?? "");
+          setInitialDescription(session.context);
+        }
         setRefinementAnalysisId(latestRefinementAnalysisIdFromItems(items));
         setAnswers(savedAnswers);
         setAmbiguityResult(rehydratedResults.ambiguityResult);
@@ -145,7 +171,7 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
 
     void loadSession();
     return () => { active = false; };
-  }, [sessionId]);
+  }, [sessionId, sessionReloadKey]);
 
   const elicitationQuestions = questions.filter((item) => item.source !== "AI");
   const refinementQuestions = refinementQuestionsFromItems(questions, refinementAnalysisId);
@@ -165,10 +191,17 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
     try {
       const started = await apiFetch<StartedElicitation>(`/api/projects/${projectId}/elicitation/start`, {
         method: "POST",
-        body: JSON.stringify({ title: sessionTitle.trim() || undefined, description: initialDescription.trim() }),
+        body: JSON.stringify({
+          title: sessionTitle.trim() || undefined,
+          description: initialDescription.trim(),
+          ...(selectedSession?.status === "DRAFT" ? { draftSessionId: selectedSession.id } : {}),
+        }),
       });
-      setSessions((current) => [...current, started.session].sort((first, second) => first.sequence - second.sequence));
+      setSessions((current) => [...current.filter((item) => item.id !== started.session.id), started.session]
+        .sort((first, second) => first.sequence - second.sequence));
+      if (started.session.id === sessionId) setSessionReloadKey((key) => key + 1);
       setSessionId(started.session.id);
+      setCreatingNewSession(false);
       setAmbiguityResult(null);
       setRefinementResult(null);
       setRefinementAnalysisId(null);
@@ -226,6 +259,7 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
     setSessions([]);
     setSessionId("");
     setQuestions([]);
+    setCreatingNewSession(false);
     setError(null);
   }
 
@@ -237,8 +271,18 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
     setGeneratedResult(null);
     setRefinedResult(null);
     setQuestions([]);
+    setCreatingNewSession(false);
     setCurrentIndex(0);
     setAnswer("");
+    setError(null);
+  }
+
+  function beginNewSession() {
+    setCreatingNewSession(true);
+    setSessionId("");
+    setQuestions([]);
+    setSessionTitle("");
+    setInitialDescription("");
     setError(null);
   }
 
@@ -246,24 +290,31 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
   if (error && projects.length === 0) return <Card className="p-6 text-sm text-red-600">{error}</Card>;
   if (!project) return <EmptyProjectState />;
 
+  const selectedSession = sessions.find((item) => item.id === sessionId);
   const contextSelector = (
-    <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-2">
+    <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-3">
       <Select label="Projeto" value={projectId} onChange={(event) => selectProject(event.target.value)}>
         {projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
       </Select>
       <Select label="Sessão" value={sessionId} onChange={(event) => selectSession(event.target.value)} disabled={sessions.length === 0}>
-        {sessions.length === 0 ? <option value="">Nova sessão</option> : sessions.map((item) => <option key={item.id} value={item.id}>Sessão #{item.sequence}{item.title ? ` · ${item.title}` : ""}</option>)}
+        {creatingNewSession || sessions.length === 0
+          ? <option value="">Nova sessão de elicitação</option>
+          : sessions.map((item) => <option key={item.id} value={item.id}>{sessionLabel(item)}</option>)}
       </Select>
+      <div className="flex items-end"><Button className="w-full" onClick={beginNewSession}><Icon name="plus" className="size-4" />Nova sessão de elicitação</Button></div>
     </div>
   );
 
   if (!sessionId || !question) {
+    if (sessionId && !creatingNewSession && selectedSession?.status !== "DRAFT") {
+      return <div className="space-y-6">{contextSelector}<Card className="p-6"><h2 className="font-bold text-slate-900">Sessão sem pergunta inicial</h2><p className="mt-2 text-sm leading-6 text-slate-600">Esta sessão não possui uma pergunta inicial para continuar a coleta. O histórico foi preservado; crie uma nova sessão para iniciar outra elicitação.</p></Card></div>;
+    }
     return (
       <div className="space-y-6">
         {contextSelector}
         <InitialElicitationForm
           projectName={project.name}
-          hasExistingSession={sessions.length > 0}
+          mode={selectedSession?.status === "DRAFT" && !creatingNewSession ? "draft" : "new"}
           title={sessionTitle}
           description={initialDescription}
           processing={starting}
@@ -333,6 +384,7 @@ export function ElicitationSession({ initialProjectId }: { initialProjectId?: st
                   guidance: item.reason,
                   source: "AI" as const,
                   generatedByAnalysis: { id: result.analysisId, structuredOutput: result.result },
+                  suggestedAnswer: item.suggestedAnswer,
                   answers: [],
                 })),
               ]);
@@ -391,6 +443,7 @@ export function refinementQuestionsFromItems(
         ...mappedQuestion,
         question: item.content,
         reason: item.guidance ?? mappedQuestion.reason,
+        suggestedAnswer: item.suggestedAnswer ?? mappedQuestion.suggestedAnswer,
         answers: item.answers,
       },
     }];
@@ -499,6 +552,9 @@ function getPersistedRefinementQuestion(value: unknown, questionId: string): Per
     ambiguityId: question.ambiguityId,
     question: question.question,
     reason: question.reason,
+    suggestedAnswer: typeof question.suggestedAnswer === "string" && question.suggestedAnswer.trim().length > 0
+      ? question.suggestedAnswer.trim()
+      : undefined,
     ambiguity: {
       description: ambiguity.description,
       severity: ambiguity.severity as "low" | "medium" | "high",
@@ -507,9 +563,22 @@ function getPersistedRefinementQuestion(value: unknown, questionId: string): Per
   };
 }
 
+const sessionStatusLabels: Record<SessionItem["status"], string> = {
+  DRAFT: "Rascunho",
+  ACTIVE: "Ativa",
+  COMPLETED: "Concluída",
+  CANCELLED: "Cancelada",
+};
+
+function sessionLabel(session: SessionItem) {
+  const title = session.title?.trim();
+  const createdAt = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short" }).format(new Date(session.createdAt));
+  return `Sessão ${session.sequence}${title ? ` · ${title}` : ""} · ${sessionStatusLabels[session.status]} · ${createdAt}`;
+}
+
 function InitialElicitationForm({
   projectName,
-  hasExistingSession,
+  mode,
   title,
   description,
   processing,
@@ -519,7 +588,7 @@ function InitialElicitationForm({
   onStart,
 }: {
   projectName: string;
-  hasExistingSession: boolean;
+  mode: "new" | "draft";
   title: string;
   description: string;
   processing: boolean;
@@ -533,12 +602,12 @@ function InitialElicitationForm({
       <div className="flex gap-3">
         <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-700"><Icon name="message-square" className="size-5" /></span>
         <div>
-          <p className="text-xs font-bold uppercase tracking-wide text-violet-700">{hasExistingSession ? "Nova sessão" : "Iniciar elicitação"}</p>
+          <p className="text-xs font-bold uppercase tracking-wide text-violet-700">{mode === "draft" ? "Inicializar rascunho" : "Nova sessão de elicitação"}</p>
           <h2 className="mt-2 text-xl font-bold text-slate-950">Comece a coleta de informações</h2>
           <p className="mt-2 text-sm leading-6 text-slate-600">Projeto selecionado: <strong>{projectName}</strong>. A descrição será registrada como o contexto e a primeira resposta imutável da sessão.</p>
         </div>
       </div>
-      {hasExistingSession && <p className="mt-5 rounded-lg bg-amber-50 p-3 text-sm leading-6 text-amber-800">A sessão selecionada ainda não possui perguntas. Esta ação criará uma nova sessão com a descrição inicial preservada.</p>}
+      {mode === "draft" && <p className="mt-5 rounded-lg bg-amber-50 p-3 text-sm leading-6 text-amber-800">A sessão selecionada é um rascunho sem perguntas. Esta ação a inicializará sem criar uma sessão duplicada.</p>}
       <div className="mt-6 grid gap-5">
         <Input label="Título da sessão (opcional)" placeholder="Ex.: Levantamento inicial da biblioteca" value={title} onChange={(event) => onTitleChange(event.target.value)} disabled={processing} />
         <Textarea
@@ -553,7 +622,7 @@ function InitialElicitationForm({
       </div>
       <p className="mt-3 text-xs text-slate-500">Informe pelo menos 20 caracteres. A IA não será chamada nesta etapa.</p>
       {error && <p className="mt-3 text-sm text-red-600" role="alert">{error}</p>}
-      <Button className="mt-6" disabled={!description.trim() || processing} onClick={onStart}><Icon name="arrow-right" className="size-4" />{processing ? "Iniciando sessão…" : "Iniciar elicitação"}</Button>
+      <Button className="mt-6" disabled={!description.trim() || processing} onClick={onStart}><Icon name="arrow-right" className="size-4" />{processing ? "Iniciando sessão…" : mode === "draft" ? "Inicializar rascunho" : "Iniciar sessão"}</Button>
     </Card>
   );
 }

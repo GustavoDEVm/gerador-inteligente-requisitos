@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "../../generated/prisma/client";
-import { notFound } from "@/lib/api/errors";
+import { conflict, invalidInput, notFound } from "@/lib/api/errors";
 import { logActivity, nextPosition, requireOwnedProject, requireOwnedQuestion, requireOwnedSession, requireUser } from "@/services/shared";
 
 type SessionStatus = "DRAFT" | "ACTIVE" | "COMPLETED" | "CANCELLED";
@@ -55,6 +55,7 @@ export async function createSession(projectId: string, userId: string, data: { t
   return prisma.$transaction(async (db) => {
     await requireOwnedProject(db, projectId, userId);
     await requireUser(db, userId);
+    await lockProjectForSessionAllocation(db, projectId);
     const status = data.status ?? "DRAFT";
     const session = await db.elicitationSession.create({
       data: {
@@ -81,21 +82,25 @@ export async function createSession(projectId: string, userId: string, data: { t
   });
 }
 
-export async function startElicitationSession(projectId: string, userId: string, data: { title?: string; description: string }) {
+export async function startElicitationSession(projectId: string, userId: string, data: { title?: string; description: string; draftSessionId?: string }) {
   return prisma.$transaction(async (db) => {
     await requireOwnedProject(db, projectId, userId);
     await requireUser(db, userId);
-    const session = await db.elicitationSession.create({
-      data: {
-        projectId,
-        createdById: userId,
-        sequence: await nextPosition(db, "session", projectId),
-        title: data.title,
-        context: data.description,
-        status: "ACTIVE",
-        startedAt: new Date(),
-      },
-    });
+    await lockProjectForSessionAllocation(db, projectId);
+
+    const session = data.draftSessionId
+      ? await initializeDraftSession(db, projectId, userId, { ...data, draftSessionId: data.draftSessionId })
+      : await db.elicitationSession.create({
+        data: {
+          projectId,
+          createdById: userId,
+          sequence: await nextPosition(db, "session", projectId),
+          title: data.title,
+          context: data.description,
+          status: "ACTIVE",
+          startedAt: new Date(),
+        },
+      });
     const question = await db.elicitationQuestion.create({
       data: {
         sessionId: session.id,
@@ -140,6 +145,41 @@ export async function startElicitationSession(projectId: string, userId: string,
     });
 
     return { session, question, answer };
+  });
+}
+
+async function lockProjectForSessionAllocation(db: Prisma.TransactionClient, projectId: string) {
+  await db.$queryRaw`SELECT "id" FROM "projects" WHERE "id" = ${projectId} FOR UPDATE`;
+}
+
+async function initializeDraftSession(
+  db: Prisma.TransactionClient,
+  projectId: string,
+  userId: string,
+  data: { title?: string; description: string; draftSessionId: string },
+) {
+  const draft = await requireOwnedSession(db, data.draftSessionId, userId);
+  if (draft.projectId !== projectId) {
+    throw invalidInput("O rascunho selecionado não pertence ao projeto atual.");
+  }
+  if (draft.status !== "DRAFT") {
+    throw conflict("A sessão selecionada já foi inicializada.");
+  }
+
+  const existingQuestionCount = await db.elicitationQuestion.count({ where: { sessionId: draft.id } });
+  if (existingQuestionCount > 0) {
+    throw conflict("O rascunho selecionado já possui perguntas e não pode ser inicializado novamente.");
+  }
+
+  return db.elicitationSession.update({
+    where: { id: draft.id },
+    data: {
+      title: data.title,
+      context: data.description,
+      status: "ACTIVE",
+      startedAt: new Date(),
+      completedAt: null,
+    },
   });
 }
 
@@ -218,10 +258,12 @@ export async function listQuestions(sessionId: string, userId: string) {
     select: { id: true },
   });
 
-  if (!selectedQuestionAnalysis) return questions.filter((question) => question.source !== "AI");
+  if (!selectedQuestionAnalysis) return attachRefinementQuestionSuggestions(questions.filter((question) => question.source !== "AI"));
 
   if (referencedQuestionAnalysis) {
-    return questions.filter((question) => question.source !== "AI" || question.generatedByAnalysisId === referencedQuestionAnalysis.id);
+    return attachRefinementQuestionSuggestions(
+      questions.filter((question) => question.source !== "AI" || question.generatedByAnalysisId === referencedQuestionAnalysis.id),
+    );
   }
 
   const latestAmbiguityIds = latestAmbiguityAnalysis
@@ -231,14 +273,14 @@ export async function listQuestions(sessionId: string, userId: string) {
     })).map((ambiguity) => ambiguity.id))
     : null;
 
-  return questions.filter((question) => {
+  return attachRefinementQuestionSuggestions(questions.filter((question) => {
     if (question.source !== "AI") return true;
     if (question.generatedByAnalysisId !== selectedQuestionAnalysis.id) return false;
     if (!latestAmbiguityIds) return true;
 
     const ambiguityId = getRefinementQuestionAmbiguityId(question.generatedByAnalysis?.structuredOutput, question.id);
     return ambiguityId !== null && latestAmbiguityIds.has(ambiguityId);
-  });
+  }));
 }
 
 function getRefinementQuestionAnalysisId(value: unknown): string | null {
@@ -253,6 +295,30 @@ function getRefinementQuestionAmbiguityId(value: unknown, questionId: string): s
     Boolean(item) && typeof item === "object" && (item as Record<string, unknown>).questionId === questionId
   ));
   return question && typeof question.ambiguityId === "string" ? question.ambiguityId : null;
+}
+
+function attachRefinementQuestionSuggestions<T extends {
+  id: string;
+  source: string;
+  generatedByAnalysis: { structuredOutput: unknown } | null;
+}>(questions: T[]) {
+  return questions.map((question) => ({
+    ...question,
+    suggestedAnswer: question.source === "AI"
+      ? getRefinementQuestionSuggestedAnswer(question.generatedByAnalysis?.structuredOutput, question.id)
+      : undefined,
+  }));
+}
+
+function getRefinementQuestionSuggestedAnswer(value: unknown, questionId: string): string | undefined {
+  if (!value || typeof value !== "object" || !("questions" in value) || !Array.isArray(value.questions)) return undefined;
+  const question = value.questions.find((item): item is Record<string, unknown> => (
+    Boolean(item) && typeof item === "object" && (item as Record<string, unknown>).questionId === questionId
+  ));
+  if (!question || typeof question.suggestedAnswer !== "string") return undefined;
+
+  const suggestedAnswer = question.suggestedAnswer.trim();
+  return suggestedAnswer.length > 0 ? suggestedAnswer : undefined;
 }
 
 export async function createQuestion(sessionId: string, userId: string, data: { content: string; guidance?: string; source?: "MANUAL" | "TEMPLATE"; position?: number }) {

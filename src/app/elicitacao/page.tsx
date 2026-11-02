@@ -2,10 +2,10 @@ import { ElicitationSession } from "@/components/elicitation/elicitation-session
 import { PageHeader } from "@/components/layout/page-header";
 
 interface ElicitationPageProps {
-  searchParams: Promise<{ projectId?: string }>;
+  searchParams: Promise<{ projectId?: string; sessionId?: string; newSession?: string }>;
 }
 
 export default async function ElicitationPage({ searchParams }: ElicitationPageProps) {
-  const { projectId } = await searchParams;
-  return <div className="space-y-6"><PageHeader eyebrow="Projeto / Elicitação" title="Sessão de elicitação" description="Colete informações de forma estruturada para apoiar a identificação futura de requisitos." /><ElicitationSession initialProjectId={projectId} /></div>;
+  const { projectId, sessionId, newSession } = await searchParams;
+  return <div className="space-y-6"><PageHeader eyebrow="Projeto / Elicitação" title="Sessão de elicitação" description="Colete informações de forma estruturada para apoiar a identificação futura de requisitos." /><ElicitationSession initialProjectId={projectId} initialSessionId={sessionId} startNewSession={newSession === "true"} /></div>;
 }

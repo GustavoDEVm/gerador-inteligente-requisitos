@@ -503,6 +503,33 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
     session: { id: string; projectId: string },
   ): Promise<ResolvedAnalysisInput> {
     const elicitationAnswer = await this.resolveInitialElicitationAnswer(db, session, "gerar perguntas de refinamento");
+    const answeredQuestions = await db.elicitationQuestion.findMany({
+      where: {
+        sessionId: session.id,
+        answers: { some: {} },
+      },
+      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true,
+        content: true,
+        answers: {
+          orderBy: { version: "desc" },
+          take: 1,
+          select: { id: true, content: true },
+        },
+      },
+    });
+    const previousAnswers = answeredQuestions.flatMap((question) => {
+      const answer = question.answers[0];
+      if (!answer || answer.id === elicitationAnswer.sourceAnswerId || answer.content.trim().length === 0) return [];
+
+      return [{
+        questionId: question.id,
+        question: question.content,
+        answerId: answer.id,
+        answer: answer.content.trim(),
+      }];
+    });
     const latestAmbiguityAnalysis = await db.aIAnalysis.findFirst({
       where: {
         projectId: session.projectId,
@@ -537,11 +564,16 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
       elicitationAnswer: elicitationAnswer.input,
       sessionId: session.id,
       sourceAnswerId: elicitationAnswer.sourceAnswerId ?? null,
+      previousAnswers,
       ambiguities: refinementAmbiguities,
     } as Prisma.InputJsonValue;
 
     return {
-      input: JSON.stringify({ elicitationAnswer: elicitationAnswer.input, ambiguities: refinementAmbiguities }),
+      input: JSON.stringify({
+        elicitationAnswer: elicitationAnswer.input,
+        previousAnswers,
+        ambiguities: refinementAmbiguities,
+      }),
       sourceAnswerId: elicitationAnswer.sourceAnswerId,
       inputSnapshot,
       refinementAmbiguities,
@@ -814,6 +846,7 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
           ambiguityId: ambiguity.id,
           question: question.content,
           reason: question.guidance ?? generatedQuestion.reason,
+          suggestedAnswer: generatedQuestion.suggestedAnswer,
           ambiguity: {
             description: ambiguity.description,
             severity: ambiguity.severity,

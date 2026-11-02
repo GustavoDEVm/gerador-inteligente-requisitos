@@ -38,7 +38,8 @@ export function RefinementQuestionsResults({
 
   async function saveAnswer(question: RefinementQuestionDisplay) {
     const latestAnswer = question.answers.at(-1)?.content ?? "";
-    const content = (drafts[question.questionId] ?? latestAnswer).trim();
+    const suggestedAnswer = question.suggestedAnswer?.trim() ?? "";
+    const content = (drafts[question.questionId] ?? (latestAnswer || suggestedAnswer || "")).trim();
     if (!content || content === latestAnswer || savingQuestionId) return;
 
     setSavingQuestionId(question.questionId);
@@ -94,8 +95,10 @@ export function RefinementQuestionsResults({
           <div className="grid gap-4 p-5 sm:p-7">
             {questions.map((item) => {
               const latestAnswer = item.answers.at(-1)?.content ?? "";
-              const draft = drafts[item.questionId] ?? latestAnswer;
+              const suggestedAnswer = item.suggestedAnswer?.trim() ?? "";
+              const draft = drafts[item.questionId] ?? (latestAnswer || suggestedAnswer || "");
               const answered = item.answers.length > 0;
+              const hasSuggestedAnswer = !answered && suggestedAnswer.length > 0;
               const severity = severityPresentation[item.ambiguity.severity];
               const saving = savingQuestionId === item.questionId;
 
@@ -125,6 +128,7 @@ export function RefinementQuestionsResults({
                       onChange={(event) => setDrafts((current) => ({ ...current, [item.questionId]: event.target.value }))}
                       disabled={Boolean(savingQuestionId)}
                     />
+                    {hasSuggestedAnswer && <p className="text-xs text-violet-700">Sugestão da IA — revise antes de salvar.</p>}
                     {answered && <p className="text-xs text-slate-500">A vers\u00e3o {item.answers.at(-1)?.version} est\u00e1 registrada. Uma altera\u00e7\u00e3o salvar\u00e1 uma nova vers\u00e3o, sem substituir o hist\u00f3rico.</p>}
                   </div>
                   <div className="mt-5 flex justify-end">
