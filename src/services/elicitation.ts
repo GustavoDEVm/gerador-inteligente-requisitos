@@ -218,10 +218,12 @@ export async function listQuestions(sessionId: string, userId: string) {
     select: { id: true },
   });
 
-  if (!selectedQuestionAnalysis) return questions.filter((question) => question.source !== "AI");
+  if (!selectedQuestionAnalysis) return attachRefinementQuestionSuggestions(questions.filter((question) => question.source !== "AI"));
 
   if (referencedQuestionAnalysis) {
-    return questions.filter((question) => question.source !== "AI" || question.generatedByAnalysisId === referencedQuestionAnalysis.id);
+    return attachRefinementQuestionSuggestions(
+      questions.filter((question) => question.source !== "AI" || question.generatedByAnalysisId === referencedQuestionAnalysis.id),
+    );
   }
 
   const latestAmbiguityIds = latestAmbiguityAnalysis
@@ -231,14 +233,14 @@ export async function listQuestions(sessionId: string, userId: string) {
     })).map((ambiguity) => ambiguity.id))
     : null;
 
-  return questions.filter((question) => {
+  return attachRefinementQuestionSuggestions(questions.filter((question) => {
     if (question.source !== "AI") return true;
     if (question.generatedByAnalysisId !== selectedQuestionAnalysis.id) return false;
     if (!latestAmbiguityIds) return true;
 
     const ambiguityId = getRefinementQuestionAmbiguityId(question.generatedByAnalysis?.structuredOutput, question.id);
     return ambiguityId !== null && latestAmbiguityIds.has(ambiguityId);
-  });
+  }));
 }
 
 function getRefinementQuestionAnalysisId(value: unknown): string | null {
@@ -253,6 +255,30 @@ function getRefinementQuestionAmbiguityId(value: unknown, questionId: string): s
     Boolean(item) && typeof item === "object" && (item as Record<string, unknown>).questionId === questionId
   ));
   return question && typeof question.ambiguityId === "string" ? question.ambiguityId : null;
+}
+
+function attachRefinementQuestionSuggestions<T extends {
+  id: string;
+  source: string;
+  generatedByAnalysis: { structuredOutput: unknown } | null;
+}>(questions: T[]) {
+  return questions.map((question) => ({
+    ...question,
+    suggestedAnswer: question.source === "AI"
+      ? getRefinementQuestionSuggestedAnswer(question.generatedByAnalysis?.structuredOutput, question.id)
+      : undefined,
+  }));
+}
+
+function getRefinementQuestionSuggestedAnswer(value: unknown, questionId: string): string | undefined {
+  if (!value || typeof value !== "object" || !("questions" in value) || !Array.isArray(value.questions)) return undefined;
+  const question = value.questions.find((item): item is Record<string, unknown> => (
+    Boolean(item) && typeof item === "object" && (item as Record<string, unknown>).questionId === questionId
+  ));
+  if (!question || typeof question.suggestedAnswer !== "string") return undefined;
+
+  const suggestedAnswer = question.suggestedAnswer.trim();
+  return suggestedAnswer.length > 0 ? suggestedAnswer : undefined;
 }
 
 export async function createQuestion(sessionId: string, userId: string, data: { content: string; guidance?: string; source?: "MANUAL" | "TEMPLATE"; position?: number }) {

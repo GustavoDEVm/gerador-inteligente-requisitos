@@ -6,11 +6,13 @@ import test from "node:test";
 
 import { executeGenerateRefinementQuestions, POST as generateRefinementQuestionsRoute } from "../../src/app/api/ai/generate-refinement-questions/route";
 import { POST as appendAnswerRoute } from "../../src/app/api/questions/[id]/answers/route";
+import { GET as listSessionQuestionsRoute } from "../../src/app/api/sessions/[id]/questions/route";
 import { refinementQuestionsFromItems } from "../../src/components/elicitation/elicitation-session";
 import { encryptSession, sessionCookieName } from "../../src/lib/auth/session";
 import { prisma } from "../../src/lib/prisma";
 import { AIService } from "../../src/services/ai/ai-service";
 import { AIProviderError } from "../../src/services/ai/errors";
+import { GENERATE_REFINEMENT_QUESTIONS_PROMPT, GENERATE_REFINEMENT_QUESTIONS_PROMPT_VERSION } from "../../src/services/ai/prompts/generate-refinement-questions";
 import { listQuestions } from "../../src/services/elicitation";
 import { MOCK_MODEL, MockAIProvider } from "../../src/services/ai/providers/mock";
 import { refinementQuestionsSchema, toProviderJsonSchema } from "../../src/services/ai/schemas";
@@ -34,6 +36,12 @@ function answerRequest(content: string, cookie: string) {
     method: "POST",
     headers: { "content-type": "application/json", cookie },
     body: JSON.stringify({ content }),
+  });
+}
+
+function sessionQuestionsRequest(sessionId: string, cookie: string) {
+  return new Request(`http://localhost/api/sessions/${sessionId}/questions`, {
+    headers: { cookie },
   });
 }
 
@@ -142,12 +150,24 @@ async function deleteTestData(projectIds: string[], userIds: string[]) {
 test("o contrato e o MockAIProvider geram perguntas determinísticas para uma, várias ou nenhuma ambiguidade", async () => {
   const firstAmbiguityId = "00000000-0000-4000-8000-000000000001";
   const secondAmbiguityId = "00000000-0000-4000-8000-000000000002";
+  const thirdAmbiguityId = "00000000-0000-4000-8000-000000000003";
+  const fourthAmbiguityId = "00000000-0000-4000-8000-000000000004";
   const valid: RefinementQuestionAIResult = {
     questions: [{ ambiguityId: firstAmbiguityId, question: "Como a regra deve funcionar?", reason: "A regra ainda está indefinida." }],
   };
   assert.equal(refinementQuestionsSchema.safeParse(valid).success, true);
+  assert.equal(refinementQuestionsSchema.safeParse({
+    questions: [{ ...valid.questions[0], suggestedAnswer: "Como proposta, a regra deve ser confirmada pelo responsável." }],
+  }).success, true);
+  assert.equal(refinementQuestionsSchema.safeParse({
+    questions: [{ ...valid.questions[0], suggestedAnswer: "   " }],
+  }).success, false);
   assert.equal(refinementQuestionsSchema.safeParse({ questions: [{ ...valid.questions[0], ambiguityId: "invalido" }] }).success, false);
   assert.equal(refinementQuestionsSchema.safeParse({ questions: [{ ambiguityId: firstAmbiguityId, question: "Pergunta", reason: "" }] }).success, false);
+
+  assert.equal(GENERATE_REFINEMENT_QUESTIONS_PROMPT_VERSION, "refinement-questions-v3");
+  assert.match(GENERATE_REFINEMENT_QUESTIONS_PROMPT, /responder diretamente à pergunta/i);
+  assert.match(GENERATE_REFINEMENT_QUESTIONS_PROMPT, /respostas isoladas como "sim" ou "não"/i);
 
   const provider = new MockAIProvider();
   const baseRequest: StructuredGenerationRequest<RefinementQuestionAIResult> = {
@@ -172,17 +192,59 @@ test("o contrato e o MockAIProvider geram perguntas determinísticas para uma, v
     }),
   });
   const none = await provider.generateStructuredResponse({ ...baseRequest, userInput: JSON.stringify({ elicitationAnswer: "Descrição", ambiguities: [] }) });
+  const generic = await provider.generateStructuredResponse({
+    ...baseRequest,
+    userInput: JSON.stringify({
+      elicitationAnswer: "Quero um sistema para agendar salas de reunião.",
+      ambiguities: [{ id: firstAmbiguityId, description: "Não está definido quem pode cancelar um agendamento." }],
+    }),
+  });
+  const semanticSuggestions = await provider.generateStructuredResponse({
+    ...baseRequest,
+    userInput: JSON.stringify({
+      elicitationAnswer: "Quero um sistema para uma loja de roupas onde clientes possam visualizar produtos, escolher tamanho e cor, adicionar itens ao carrinho e realizar pedidos.",
+      previousAnswers: [
+        { question: "O fluxo deve registrar os pedidos?", answer: "Sim" },
+        { question: "O cliente poderá acompanhar o pedido?", answer: "Sim" },
+        { question: "O sistema deve atualizar dados do produto?", answer: "Sim" },
+        { question: "O administrador poderá consultar as operações?", answer: "Sim" },
+        { question: "O sistema deve informar alterações relevantes?", answer: "Sim" },
+      ],
+      ambiguities: [
+        { id: firstAmbiguityId, description: "Não está definido como o usuário será informado sobre mudanças no fluxo principal." },
+        { id: secondAmbiguityId, description: "Não está definido se o cliente precisa estar autenticado para finalizar um pedido." },
+        { id: thirdAmbiguityId, description: "Não está definido como o estoque é atualizado após um pedido." },
+        { id: fourthAmbiguityId, description: "Não está definido como funciona a combinação de tamanho e cor de cada produto." },
+      ],
+    }),
+  });
 
   assert.equal(one.model, MOCK_MODEL);
   assert.deepEqual(one, await provider.generateStructuredResponse(baseRequest));
   assert.equal(one.output.questions.length, 1);
+  assert.match(one.output.questions[0]?.suggestedAnswer ?? "", /estoque.*reduzido|reduzido.*estoque/i);
   assert.deepEqual(multiple.output.questions.map((question) => question.ambiguityId), [firstAmbiguityId, secondAmbiguityId]);
   assert.deepEqual(multiple.output.questions.map((question) => question.question), [
     "O cliente precisa estar autenticado para finalizar um pedido?",
     "Como devem ser cadastradas e controladas as combinações de tamanho e cor de cada produto?",
   ]);
+  assert.match(multiple.output.questions[0]?.suggestedAnswer ?? "", /autenticado.*finalizar.*pedido/i);
+  assert.match(multiple.output.questions[1]?.suggestedAnswer ?? "", /tamanho.*cor.*estoque|estoque.*tamanho.*cor/i);
   assert.doesNotMatch(JSON.stringify(multiple.output), /\b(aluno|livro|acervo|reserva)\b/i);
   assert.deepEqual(none.output, { questions: [] });
+  assert.match(generic.output.questions[0]?.suggestedAnswer ?? "", /proposta inicial/i);
+  assert.doesNotMatch(generic.output.questions[0]?.suggestedAnswer ?? "", /regra de negócio deve definir|não está definido/i);
+  assert.doesNotMatch(JSON.stringify(generic.output), /\b(roupa|cliente|carrinho|estoque|livro|aluno|acervo|reserva)\b/i);
+  assert.equal(semanticSuggestions.output.questions.length, 4);
+  assert.equal(new Set(semanticSuggestions.output.questions.map((question) => question.suggestedAnswer)).size, 4);
+  assert.ok(semanticSuggestions.output.questions.every((question) => Boolean(question.suggestedAnswer?.trim())));
+  const suggestionByAmbiguity = new Map(semanticSuggestions.output.questions.map((question) => [question.ambiguityId, question.suggestedAnswer ?? ""]));
+  const communicationSuggestion = suggestionByAmbiguity.get(firstAmbiguityId) ?? "";
+  assert.match(communicationSuggestion, /notificação.*interface|interface.*notificação/i);
+  assert.doesNotMatch(communicationSuggestion, /regra de negócio deve definir|não está definido|autentic|estoque/i);
+  assert.match(suggestionByAmbiguity.get(secondAmbiguityId) ?? "", /autenticado.*finalizar.*pedido/i);
+  assert.match(suggestionByAmbiguity.get(thirdAmbiguityId) ?? "", /estoque.*reduzido|reduzido.*estoque/i);
+  assert.match(suggestionByAmbiguity.get(fourthAmbiguityId) ?? "", /tamanho.*cor.*estoque|estoque.*tamanho.*cor/i);
 });
 
 test("o painel de refinamento seleciona somente três perguntas da terceira execução", () => {
@@ -231,6 +293,53 @@ test("o painel de refinamento seleciona somente três perguntas da terceira exec
   assert.equal(latestQuestions.filter((question) => question.answers.length > 0).length, 0);
 });
 
+test("questões históricas sem sugestão válida continuam disponíveis para resposta manual", () => {
+  const analysisId = "analysis-historical-questions";
+  const structuredOutput = {
+    questions: [
+      {
+        questionId: "question-without-suggestion",
+        ambiguityId: "ambiguity-without-suggestion",
+        question: "Qual regra deve ser definida?",
+        reason: "A regra precisa de esclarecimento.",
+        ambiguity: { description: "Regra pendente.", severity: "medium", context: null },
+      },
+      {
+        questionId: "question-invalid-suggestion",
+        ambiguityId: "ambiguity-invalid-suggestion",
+        question: "Quem deve confirmar o fluxo?",
+        reason: "A responsabilidade precisa de esclarecimento.",
+        suggestedAnswer: "   ",
+        ambiguity: { description: "Responsabilidade pendente.", severity: "low", context: null },
+      },
+    ],
+  };
+  const questions = refinementQuestionsFromItems([
+    {
+      id: "question-without-suggestion",
+      position: 1,
+      content: "Qual regra deve ser definida?",
+      guidance: "A regra precisa de esclarecimento.",
+      source: "AI",
+      generatedByAnalysis: { id: analysisId, structuredOutput },
+      answers: [],
+    },
+    {
+      id: "question-invalid-suggestion",
+      position: 2,
+      content: "Quem deve confirmar o fluxo?",
+      guidance: "A responsabilidade precisa de esclarecimento.",
+      source: "AI",
+      generatedByAnalysis: { id: analysisId, structuredOutput },
+      answers: [],
+    },
+  ] as Parameters<typeof refinementQuestionsFromItems>[0], analysisId);
+
+  assert.equal(questions.length, 2);
+  assert.ok(questions.every((question) => question.suggestedAnswer === undefined));
+  assert.ok(questions.every((question) => question.answers.length === 0));
+});
+
 test("a API preserva ownership, histórico, vínculo de origem e respostas versionadas", async () => {
   const suffix = randomBytes(6).toString("hex");
   const projectIds: string[] = [];
@@ -259,6 +368,22 @@ test("a API preserva ownership, histórico, vínculo de origem e respostas versi
       await prisma.elicitationQuestion.create({ data: { sessionId: sessionWithoutAnswer.id, position: 1, content: "Descreva a necessidade inicial do sistema.", source: "TEMPLATE" } });
       const initialAnswer = await prisma.elicitationAnswer.create({
         data: { questionId: question.id, authorId: owner.id, version: 1, content: "Quero um sistema para uma clínica onde pacientes possam marcar e cancelar consultas." },
+      });
+      const priorQuestion = await prisma.elicitationQuestion.create({
+        data: {
+          sessionId: session.id,
+          position: 2,
+          content: "Como o usuário deve ser informado sobre mudanças importantes no fluxo?",
+          source: "MANUAL",
+        },
+      });
+      const priorAnswer = await prisma.elicitationAnswer.create({
+        data: {
+          questionId: priorQuestion.id,
+          authorId: owner.id,
+          version: 1,
+          content: "O sistema deve mostrar uma notificação na interface quando houver uma mudança importante.",
+        },
       });
       const ownerCookie = `${sessionCookieName}=${await encryptSession({ userId: owner.id })}`;
       const otherUserCookie = `${sessionCookieName}=${await encryptSession({ userId: otherUser.id })}`;
@@ -300,6 +425,7 @@ test("a API preserva ownership, histórico, vínculo de origem e respostas versi
       assert.equal(firstPayload.data.result.questions.length, 1);
       assert.equal(firstPayload.data.result.questions[0]?.ambiguityId, firstAmbiguity.id);
       assert.equal(firstPayload.data.result.questions[0]?.ambiguity.severity, "high");
+      assert.ok(firstPayload.data.result.questions[0]?.suggestedAnswer);
 
       const firstAnalysis = await prisma.aIAnalysis.findUniqueOrThrow({
         where: { id: firstPayload.data.analysisId },
@@ -309,12 +435,18 @@ test("a API preserva ownership, histórico, vínculo de origem e respostas versi
       assert.equal(firstAnalysis.status, "SUCCEEDED");
       assert.equal(firstAnalysis.provider, "mock");
       assert.equal(firstAnalysis.model, MOCK_MODEL);
-      assert.equal(firstAnalysis.promptVersion, "refinement-questions-v1");
+      assert.equal(firstAnalysis.promptVersion, "refinement-questions-v3");
       assert.equal(firstAnalysis.sessions[0]?.sessionId, session.id);
       assert.deepEqual(firstAnalysis.inputSnapshot, {
         elicitationAnswer: initialAnswer.content,
         sessionId: session.id,
         sourceAnswerId: initialAnswer.id,
+        previousAnswers: [{
+          questionId: priorQuestion.id,
+          question: priorQuestion.content,
+          answerId: priorAnswer.id,
+          answer: priorAnswer.content,
+        }],
         ambiguities: [{
           id: firstAmbiguity.id,
           description: firstAmbiguity.description,
@@ -327,6 +459,21 @@ test("a API preserva ownership, histórico, vínculo de origem e respostas versi
       assert.equal(firstAnalysis.generatedQuestions[0]?.source, "AI");
       assert.equal(firstAnalysis.generatedQuestions[0]?.generatedByAnalysisId, firstAnalysis.id);
       assert.equal(firstAnalysis.generatedQuestions[0]?.sessionId, session.id);
+      const generatedQuestionId = firstPayload.data.result.questions[0]!.questionId;
+      assert.equal(await prisma.elicitationAnswer.count({ where: { questionId: generatedQuestionId } }), 0);
+      assert.equal(await prisma.activityLog.count({ where: { projectId: project.id, action: "ANSWER_RECORDED" } }), 0);
+
+      const sessionQuestionsResponse = await listSessionQuestionsRoute(
+        sessionQuestionsRequest(session.id, ownerCookie),
+        { params: Promise.resolve({ id: session.id }) },
+      );
+      assert.equal(sessionQuestionsResponse.status, 200);
+      const sessionQuestionsPayload = await sessionQuestionsResponse.json() as {
+        data: { id: string; source: string; suggestedAnswer?: string }[];
+      };
+      const generatedQuestionFromApi = sessionQuestionsPayload.data.find((question) => question.id === generatedQuestionId);
+      assert.equal(generatedQuestionFromApi?.source, "AI");
+      assert.equal(generatedQuestionFromApi?.suggestedAnswer, firstPayload.data.result.questions[0]?.suggestedAnswer);
 
       const secondAmbiguity = await createDetectedAmbiguity({
         projectId: project.id,
@@ -346,7 +493,6 @@ test("a API preserva ownership, histórico, vínculo de origem e respostas versi
         [secondPayload.data.analysisId],
       );
 
-      const generatedQuestionId = firstPayload.data.result.questions[0]!.questionId;
       const firstAnswerResponse = await appendAnswerRoute(answerRequest("O paciente pode cancelar até duas horas antes da consulta.", ownerCookie), { params: Promise.resolve({ id: generatedQuestionId }) });
       assert.equal(firstAnswerResponse.status, 201);
       const secondAnswerResponse = await appendAnswerRoute(answerRequest("O paciente pode cancelar até uma hora antes da consulta.", ownerCookie), { params: Promise.resolve({ id: generatedQuestionId }) });
@@ -440,6 +586,17 @@ test("três execuções históricas preservam nove perguntas e carregam somente 
       assert.equal(visibleRefinementQuestions.length, 3);
       assert.ok(visibleRefinementQuestions.every((question) => question.generatedByAnalysisId === thirdGeneration.data.analysisId));
       assert.ok(visibleRefinementQuestions.every((question) => question.answers.length === 0));
+      const visibleQuestionsResponse = await listSessionQuestionsRoute(
+        sessionQuestionsRequest(session.id, cookie),
+        { params: Promise.resolve({ id: session.id }) },
+      );
+      assert.equal(visibleQuestionsResponse.status, 200);
+      const visibleQuestionsPayload = await visibleQuestionsResponse.json() as {
+        data: { source: string; suggestedAnswer?: string }[];
+      };
+      const visibleQuestionsFromApi = visibleQuestionsPayload.data.filter((question) => question.source === "AI");
+      assert.equal(visibleQuestionsFromApi.length, 3);
+      assert.ok(visibleQuestionsFromApi.every((question) => Boolean(question.suggestedAnswer?.trim())));
       assert.notEqual(firstDetection.analysis.id, secondDetection.analysis.id);
     } finally {
       await deleteTestData(projectIds, userIds);

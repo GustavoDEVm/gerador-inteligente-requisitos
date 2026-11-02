@@ -55,6 +55,7 @@ export const refinementQuestionsSchema: z.ZodType<RefinementQuestionAIResult> = 
         ambiguityId: z.uuid("O identificador da ambiguidade deve ser um UUID v\u00e1lido."),
         question: resultText("A pergunta de refinamento", 1_500),
         reason: resultText("O motivo do esclarecimento", 1_000),
+        suggestedAnswer: resultText("A sugestão de resposta", 1_500).optional(),
       }).strict())
       .max(50, "A gera\u00e7\u00e3o possui perguntas demais."),
   })

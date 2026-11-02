@@ -55,6 +55,7 @@ const refinementQuestions = [
     ambiguityId: "ambiguity-authentication",
     question: "O cliente precisa estar autenticado para finalizar um pedido?",
     reason: "A regra de acesso precisa estar definida antes da finalização.",
+    suggestedAnswer: "Sugestão que não pode substituir a resposta persistida de autenticação.",
     ambiguity: {
       description: "Não está definido se o cliente precisa estar autenticado para finalizar um pedido.",
       severity: "medium",
@@ -66,6 +67,7 @@ const refinementQuestions = [
     ambiguityId: "ambiguity-stock",
     question: "Como o estoque deve ser atualizado após a confirmação de um pedido?",
     reason: "A regra de atualização do estoque precisa ser definida.",
+    suggestedAnswer: "Sugestão que não pode substituir a resposta persistida de estoque.",
     ambiguity: {
       description: "Não está definido como o estoque é atualizado após um pedido.",
       severity: "high",
@@ -77,6 +79,7 @@ const refinementQuestions = [
     ambiguityId: "ambiguity-variation",
     question: "Como funcionam as combinações de tamanho e cor de cada produto?",
     reason: "As variações precisam ter estoque próprio.",
+    suggestedAnswer: "Sugestão que não pode substituir a resposta persistida de variações.",
     ambiguity: {
       description: "Não está definida a combinação de tamanho e cor de cada produto.",
       severity: "medium",
@@ -170,6 +173,7 @@ function readPayloadFor(url: string): unknown {
         content: refinementQuestions[0].question,
         guidance: refinementQuestions[0].reason,
         source: "AI",
+        suggestedAnswer: refinementQuestions[0].suggestedAnswer,
         generatedByAnalysis: { id: questionsAnalysisId, structuredOutput: { questions: refinementQuestions } },
         answers: [
           { id: "answer-authentication-v1", version: 1, content: "Ainda não definido." },
@@ -182,6 +186,7 @@ function readPayloadFor(url: string): unknown {
         content: refinementQuestions[1].question,
         guidance: refinementQuestions[1].reason,
         source: "AI",
+        suggestedAnswer: refinementQuestions[1].suggestedAnswer,
         generatedByAnalysis: { id: questionsAnalysisId, structuredOutput: { questions: refinementQuestions } },
         answers: [{ id: "answer-stock-v1", version: 1, content: latestAnswers.stock }],
       },
@@ -191,6 +196,7 @@ function readPayloadFor(url: string): unknown {
         content: refinementQuestions[2].question,
         guidance: refinementQuestions[2].reason,
         source: "AI",
+        suggestedAnswer: refinementQuestions[2].suggestedAnswer,
         generatedByAnalysis: { id: questionsAnalysisId, structuredOutput: { questions: refinementQuestions } },
         answers: [{ id: "answer-variation-v1", version: 1, content: latestAnswers.variation }],
       },
@@ -252,6 +258,7 @@ function jsonResponse(data: unknown) {
 function assertVisualState(screen: typeof import("@testing-library/react")["screen"]) {
   assert.ok(screen.getByText("3/3 respondidas"));
   assert.equal(screen.getAllByText("Respondida").length, 3);
+  assert.equal(screen.queryByText("Sugestão da IA — revise antes de salvar."), null);
   assert.equal(
     (screen.getByLabelText(`Resposta para: ${refinementQuestions[0].question}`) as HTMLTextAreaElement).value,
     latestAnswers.authentication,

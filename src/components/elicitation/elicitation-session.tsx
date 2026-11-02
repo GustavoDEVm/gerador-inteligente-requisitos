@@ -34,6 +34,7 @@ type QuestionItem = {
   guidance: string | null;
   source: "MANUAL" | "TEMPLATE" | "AI";
   generatedByAnalysis: { id: string; structuredOutput: unknown } | null;
+  suggestedAnswer?: string;
   answers: { id: string; version: number; content: string }[];
 };
 
@@ -391,6 +392,7 @@ export function refinementQuestionsFromItems(
         ...mappedQuestion,
         question: item.content,
         reason: item.guidance ?? mappedQuestion.reason,
+        suggestedAnswer: item.suggestedAnswer ?? mappedQuestion.suggestedAnswer,
         answers: item.answers,
       },
     }];
@@ -499,6 +501,9 @@ function getPersistedRefinementQuestion(value: unknown, questionId: string): Per
     ambiguityId: question.ambiguityId,
     question: question.question,
     reason: question.reason,
+    suggestedAnswer: typeof question.suggestedAnswer === "string" && question.suggestedAnswer.trim().length > 0
+      ? question.suggestedAnswer.trim()
+      : undefined,
     ambiguity: {
       description: ambiguity.description,
       severity: ambiguity.severity as "low" | "medium" | "high",

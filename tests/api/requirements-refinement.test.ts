@@ -201,6 +201,7 @@ test("o refinamento cria uma nova análise e preserva requisitos e fontes anteri
               ambiguityId: ambiguities[index]!.id,
               question: question.content,
               reason: "Teste de rastreabilidade.",
+              suggestedAnswer: "SUGESTÃO-NAO-RESPONDIDA-PELO-USUARIO",
               ambiguity: { description: ambiguities[index]!.description, severity: "medium", context: null },
             })),
           },
@@ -254,6 +255,7 @@ test("o refinamento cria uma nova análise e preserva requisitos e fontes anteri
       const authenticationAnswer = providerPayload.refinementAnswers.find((answer) => /autenticado.*finalizar.*pedido/i.test(answer.question));
       assert.equal(authenticationAnswer?.question, "O cliente precisa estar autenticado para finalizar um pedido?");
       assert.equal(authenticationAnswer?.answer, "sim");
+      assert.doesNotMatch(providerInput, /SUGESTÃO-NAO-RESPONDIDA-PELO-USUARIO/);
       assert.equal(providerPayload.previousRequirements.acceptanceCriteria.includes("Este critério arquivado não deve ser usado no refinamento."), false);
 
       const refinedAnalysis = await prisma.aIAnalysis.findUniqueOrThrow({ where: { id: refinementPayload.data.analysisId } });
