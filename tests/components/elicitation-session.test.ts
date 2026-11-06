@@ -142,7 +142,7 @@ test("a sessão de elicitação reidrata visualmente respostas e resultados sem 
       writable: true,
       value: originalFetch,
     });
-    restoreDom();
+    await restoreDom();
   }
 });
 
@@ -151,7 +151,7 @@ function readPayloadFor(url: string): unknown {
     return [{ id: projectId, name: "Sistema de Gestão de Loja de Roupas" }];
   }
   if (url === `/api/projects/${projectId}/sessions`) {
-    return [{ id: sessionId, sequence: 1, title: "Elicitação da loja de roupas" }];
+    return [{ id: sessionId, sequence: 1, title: "Elicitação da loja de roupas", status: "COMPLETED", createdAt: "2026-10-30T09:00:00.000Z" }];
   }
   if (url === `/api/sessions/${sessionId}/questions`) {
     return [
@@ -198,6 +198,10 @@ function readPayloadFor(url: string): unknown {
   }
   if (url === `/api/sessions/${sessionId}`) {
     return {
+      id: sessionId,
+      title: "Elicitação da loja de roupas",
+      context: "A loja deve permitir consultar roupas, montar carrinho e realizar pedidos.",
+      status: "COMPLETED",
       analyses: [
         {
           analysis: {

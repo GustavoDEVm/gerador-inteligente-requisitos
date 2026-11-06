@@ -30,7 +30,7 @@ GeminiProvider ou MockAIProvider
 Gemini API ou resposta local determinística
 ```
 
-`AIProvider` recebe uma solicitação genérica com modelo, instrução de sistema, entrada do usuário, JSON Schema, temperatura, timeout e metadados. A interface não contém nomenclatura do Gemini. `GeminiProvider` adapta esse contrato para `GoogleGenAI.models.generateContent` e é o único arquivo que importa `@google/genai`. `MockAIProvider` retorna um resultado fixo, já validado por `initialRequirementAnalysisSchema`, sem importar SDK, acessar rede ou ler variáveis Gemini.
+`AIProvider` recebe uma solicitação genérica com modelo, instrução de sistema, entrada do usuário, JSON Schema, temperatura, timeout e metadados. A interface não contém nomenclatura do Gemini. `GeminiProvider` adapta esse contrato para `GoogleGenAI.models.generateContent` e é o único arquivo que importa `@google/genai`. `MockAIProvider` retorna resultados estruturados, determinísticos e coerentes com a operação e o contexto recebido, sem importar SDK, acessar rede ou ler variáveis Gemini.
 
 `AIService` é responsável por autorização, rastreabilidade e validação. A Route Handler limita-se a autenticar, validar o corpo HTTP com Zod e chamar o serviço. Componentes React não acessam o SDK, variáveis de ambiente ou credenciais.
 
@@ -172,7 +172,7 @@ Cada chamada registra uma nova `AIAnalysis` do tipo `AMBIGUITY_DETECTION`, vincu
 
 `POST /api/ai/generate-refinement-questions` recebe somente `projectId` e `sessionId`. No servidor, a operação confirma autenticação, ownership, vínculo sessão-projeto e recupera ambiguidades abertas cuja análise de origem pertence à sessão. A resposta inicial versionada e esse conjunto mínimo de ambiguidades formam a entrada do provider; a interface nunca envia ambiguidades ou uma nova descrição.
 
-O contrato `refinement-questions-v1` retorna `questions` com `ambiguityId`, `question` e `reason`. Zod valida a estrutura e o serviço confirma que cada ID pertence às ambiguidades elegíveis. Cada execução cria uma `AIAnalysis` `QUESTION_GENERATION` e perguntas `ElicitationQuestion` com `source = AI` e `generatedByAnalysisId`. O mapeamento exato da pergunta persistida para a ambiguidade fica em `AIAnalysis.structuredOutput`, preservando a origem sem mudança no schema. As respostas reutilizam o endpoint versionado de elicitação. A operação não regenera requisitos e não é acionada automaticamente. Consulte [refinement-questions.md](refinement-questions.md) para detalhes e testes.
+O contrato `refinement-questions-v3` retorna `questions` com `ambiguityId`, `question`, `reason` e `suggestedAnswer` opcional. A sugestão é uma hipótese contextualizada para revisão do usuário, não uma resposta confirmada. Zod valida a estrutura e o serviço confirma que cada ID pertence às ambiguidades elegíveis. Cada execução cria uma `AIAnalysis` `QUESTION_GENERATION` e perguntas `ElicitationQuestion` com `source = AI` e `generatedByAnalysisId`. O mapeamento exato da pergunta persistida para a ambiguidade e a sugestão ficam em `AIAnalysis.structuredOutput`, preservando a origem sem mudança no schema. Na interface, a sugestão pode ser editada ou apagada e só cria uma resposta versionada após o salvamento explícito. A geração de perguntas não regenera requisitos e não é acionada automaticamente; o refinamento é uma operação posterior e explícita. Consulte [refinement-questions.md](refinement-questions.md) para detalhes e testes.
 
 ## Refinamento de requisitos — Fase 11
 

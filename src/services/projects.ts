@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { notFound } from "@/lib/api/errors";
+import { deleteProjectDependencies, ensureProjectHasNoActiveAnalyses, lockProjectForDeletion } from "@/services/deletion";
 import { logActivity, requireOwnedProject, requireUser } from "@/services/shared";
 
 type CreateProjectInput = {
@@ -108,6 +109,17 @@ export async function archiveProject(id: string, userId: string) {
       summary: `Projeto ${project.name} arquivado.`,
     });
     return archived;
+  });
+}
+
+export async function deleteProject(id: string, userId: string) {
+  return prisma.$transaction(async (db) => {
+    const project = await requireOwnedProject(db, id, userId);
+    await lockProjectForDeletion(db, id);
+    await ensureProjectHasNoActiveAnalyses(db, id);
+    await deleteProjectDependencies(db, id);
+    await db.project.delete({ where: { id } });
+    return { id: project.id, name: project.name };
   });
 }
 

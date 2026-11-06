@@ -102,6 +102,7 @@ export const generateRefinementQuestionsSchema = aiGenerationContextSchema.stric
 export const startElicitationSchema = z.object({
   title: optionalText(160),
   description: systemDescriptionSchema,
+  draftSessionId: uuid.optional(),
 });
 
 export const createRequirementSchema = z.object({

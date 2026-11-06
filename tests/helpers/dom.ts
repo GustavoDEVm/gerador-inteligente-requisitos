@@ -8,6 +8,8 @@ type GlobalPropertyDescriptor = {
 /**
  * Instala um DOM isolado para um teste de componente executado pelo node:test.
  * A função retornada restaura todos os globais alterados ao estado anterior.
+ * O descarte é assíncrono para permitir que efeitos pendentes do React/JSDOM
+ * terminem antes da remoção de `window` e `document` globais.
  */
 export function installDomEnvironment() {
   const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -55,7 +57,10 @@ export function installDomEnvironment() {
     });
   }
 
-  return () => {
+  return async () => {
+    await Promise.resolve();
+    await new Promise<void>((resolve) => dom.window.setTimeout(resolve, 0));
+
     for (const { key, descriptor } of previous) {
       if (descriptor) {
         Object.defineProperty(globalObject, key, descriptor);

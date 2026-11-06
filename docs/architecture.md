@@ -16,7 +16,7 @@ Adotar Next.js com App Router como interface e backend inicial, organizado como 
 
 ## Contrato da IA
 
-As respostas do modelo são solicitadas em JSON estruturado e validadas com Zod no backend antes do uso. A análise inicial entrega resumo, User Story inicial, observações, ambiguidades e sugestões. A geração de requisitos e o refinamento geram User Story, requisitos funcionais e não funcionais e critérios de aceitação, com persistência e rastreabilidade. A aplicação também detecta ambiguidades e gera perguntas de refinamento associadas a elas. Edições manuais de requisitos, User Stories e critérios de aceitação preservam revisões imutáveis.
+As respostas do modelo são solicitadas em JSON estruturado e validadas com Zod no backend antes do uso. A análise inicial entrega resumo, User Story inicial, observações, ambiguidades e sugestões. A geração de requisitos e o refinamento geram User Story, requisitos funcionais e não funcionais e critérios de aceitação, com persistência e rastreabilidade. A aplicação também detecta ambiguidades e gera perguntas de refinamento associadas a elas. Cada pergunta pode carregar uma sugestão de resposta contextualizada, tratada pela interface como rascunho editável e não como fato confirmado. Edições manuais de requisitos, User Stories e critérios de aceitação preservam revisões imutáveis.
 
 `AIProvider` mantém as regras de negócio independentes do SDK. Em execução, `AI_PROVIDER=gemini` seleciona `GeminiProvider` e `AI_PROVIDER=mock` seleciona `MockAIProvider`, determinístico e sem acesso à rede, adequado para desenvolvimento e testes.
 
@@ -50,8 +50,8 @@ O sistema usa autenticação por credenciais sem um provedor externo. A senha é
 | --- | --- |
 | `/api/auth/register`, `/api/auth/login`, `/api/auth/logout`, `/api/auth/session` | cadastro, login, encerramento e consulta segura da sessão |
 | `/api/users` | consulta limitada ao próprio usuário autenticado; cadastro ocorre em `/api/auth/register` |
-| `/api/projects` | listar, consultar, criar, atualizar e arquivar logicamente projetos; stakeholders, sessões e atividades aninhados |
-| `/api/sessions`, `/api/questions` | consultar/atualizar sessão, listar/criar perguntas e anexar/listar respostas versionadas |
+| `/api/projects`, `/api/projects/[id]` | listar, consultar, criar, atualizar, arquivar logicamente e excluir permanentemente projetos; stakeholders, sessões e atividades aninhados |
+| `/api/projects/[id]/elicitation/start`, `/api/sessions`, `/api/sessions/[id]`, `/api/questions` | iniciar, listar, consultar, atualizar e excluir sessões; listar/criar perguntas e anexar/listar respostas versionadas |
 | `/api/requirements` | listar/criar por projeto, consultar e atualizar requisito |
 | `/api/user-stories`, `/api/acceptance-criteria` | criar/atualizar User Stories, relacionar requisitos e gerenciar critérios |
 | `/api/ambiguities`, `/api/suggestions` | listar/criar por projeto e atualizar decisão/resolução |
@@ -59,7 +59,7 @@ O sistema usa autenticação por credenciais sem um provedor externo. A senha é
 
 As respostas seguem o envelope `{ "data": ... }` em sucesso e `{ "error": { "code", "message" } }` em falhas. Entradas inválidas retornam `400`, sessão ausente retorna `401`, acesso a recurso de outro proprietário retorna `403`, registros ausentes retornam `404`, conflitos de unicidade/associação retornam `409` e falhas inesperadas retornam mensagem genérica `500`. Respostas de elicitação não possuem operação de atualização: um novo `POST` cria a próxima versão.
 
-O início guiado da coleta usa `POST /api/projects/[id]/elicitation/start`. Em uma transação autenticada e autorizada, ele cria uma sessão `ACTIVE`, registra sua descrição como `context`, insere a pergunta-template de descrição inicial e a primeira `ElicitationAnswer` imutável/versionada. Esse endpoint de caso de uso complementa, sem substituir, as rotas genéricas de sessão, perguntas e respostas.
+O início guiado da coleta usa `POST /api/projects/[id]/elicitation/start`. Em uma transação autenticada e autorizada, ele cria uma sessão `ACTIVE`, registra sua descrição como `context`, insere a pergunta-template de descrição inicial e a primeira `ElicitationAnswer` imutável/versionada. O projeto pode possuir várias sessões, ordenadas por uma sequência única por projeto. A interface lista e abre cada sessão pelo seu identificador, impedindo que uma sessão de outro projeto seja carregada no contexto atual. Esse endpoint de caso de uso complementa, sem substituir, as rotas genéricas de sessão, perguntas e respostas.
 
 ## Implementação — Fase 7: IA multi-provider
 
@@ -125,6 +125,12 @@ Para evitar bloqueio permanente após queda do processo, uma análise ativa do m
 
 ## Histórico e reidratação
 
-As análises de requisitos, ambiguidades, perguntas e refinamentos são persistidas em `AIAnalysis` e vinculadas à sessão. No carregamento da sessão, o backend determina o conjunto relevante de perguntas: após um refinamento bem-sucedido, usa a geração de perguntas referenciada no `inputSnapshot` dessa análise; caso contrário, usa a geração de perguntas mais recente. A interface reidrata análises, perguntas e respostas persistidas sem executar a IA ou criar artefatos no reload.
+As análises de requisitos, ambiguidades, perguntas e refinamentos são persistidas em `AIAnalysis` e vinculadas à sessão. No carregamento da sessão, o backend determina o conjunto relevante de perguntas: após um refinamento bem-sucedido, usa a geração de perguntas referenciada no `inputSnapshot` dessa análise; caso contrário, usa a geração de perguntas mais recente. A interface reidrata análises, perguntas e respostas persistidas sem executar a IA ou criar artefatos no reload. Para uma pergunta de refinamento, a prioridade visual é: rascunho do usuário, resposta persistida mais recente, sugestão de resposta da IA e, por fim, campo vazio. A sugestão nunca cria uma `ElicitationAnswer` por si só.
 
 Requisitos, User Stories e critérios de aceitação possuem revisões imutáveis. As operações de criação e atualização dos três artefatos, além do arquivamento lógico de critérios, registram um snapshot completo em `RequirementRevision`, `UserStoryRevision` ou `AcceptanceCriterionRevision` dentro da mesma transação da alteração. As associações com `AIAnalysis` e as versões de respostas de elicitação permanecem preservadas para rastreabilidade.
+
+## Exclusão permanente controlada
+
+O arquivamento lógico de projetos continua disponível. Separadamente, `DELETE /api/projects/[id]` realiza uma exclusão permanente somente após confirmação explícita na interface e autorização do proprietário. A operação bloqueia o projeto, recusa a exclusão quando houver análise de IA `PENDING` ou `RUNNING` e remove o agregado do projeto em uma única transação.
+
+`DELETE /api/sessions/[id]` segue a mesma proteção de propriedade e de análise ativa. A remoção exclui perguntas, respostas, análises e artefatos exclusivos daquela sessão, mas preserva requisitos e User Stories que conservem fontes válidas em outra sessão do mesmo projeto. A interface atualiza a seleção para outra sessão disponível — preferindo uma ativa — ou apresenta o estado vazio para criar uma nova sessão. Nenhuma dessas operações altera o schema ou recria artefatos.

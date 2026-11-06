@@ -84,6 +84,7 @@ export type RefinementQuestionAIResult = {
     ambiguityId: string;
     question: string;
     reason: string;
+    suggestedAnswer?: string;
   }[];
 };
 
@@ -103,6 +104,7 @@ export type PersistedRefinementQuestion = {
   ambiguityId: string;
   question: string;
   reason: string;
+  suggestedAnswer?: string;
   ambiguity: RefinementQuestionAmbiguity;
 };
 

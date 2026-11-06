@@ -5,6 +5,16 @@ export const MOCK_MODEL = "mock";
 
 type MockDomain = "clothing-store" | "library" | "generic";
 
+type MockPriorAnswer = {
+  question: string;
+  answer: string;
+};
+
+type MockRefinementContext = {
+  elicitationAnswer: string;
+  previousAnswers: MockPriorAnswer[];
+};
+
 const clothingKeywords = ["roupa", "roupas", "vestuário", "vestuario", "moda", "tamanho", "carrinho", "estoque"];
 const libraryKeywords = ["biblioteca", "livro", "livros", "acervo"];
 
@@ -277,6 +287,7 @@ function getClothingRefinementQuestion(description: string) {
     return {
       question: "Como o estoque do produto deve ser atualizado após a confirmação de um pedido?",
       reason: "A regra é necessária para manter a disponibilidade dos produtos correta após cada pedido.",
+      suggestedAnswer: "Como proposta para validação, o estoque deve ser reduzido automaticamente após a confirmação do pedido, considerando a quantidade de cada combinação de tamanho e cor.",
     };
   }
 
@@ -284,6 +295,7 @@ function getClothingRefinementQuestion(description: string) {
     return {
       question: "O cliente precisa estar autenticado para finalizar um pedido?",
       reason: "A definição é necessária para estabelecer a regra de acesso ao fechamento do pedido.",
+      suggestedAnswer: "Como proposta para validação, o cliente deve estar autenticado para finalizar o pedido com os itens selecionados no carrinho.",
     };
   }
 
@@ -291,6 +303,7 @@ function getClothingRefinementQuestion(description: string) {
     return {
       question: "Como devem ser cadastradas e controladas as combinações de tamanho e cor de cada produto?",
       reason: "A regra é necessária para apresentar somente as variações de produto disponíveis ao cliente.",
+      suggestedAnswer: "Como proposta para validação, cada produto deve possuir combinações específicas de tamanho e cor, com estoque controlado separadamente para cada combinação.",
     };
   }
 
@@ -312,7 +325,19 @@ function mockRefinementQuestionsResponse(input: string) {
   const ambiguities = parsedInput && typeof parsedInput === "object" && "ambiguities" in parsedInput
     ? (parsedInput as { ambiguities?: unknown }).ambiguities
     : undefined;
-  const isClothingContext = typeof elicitationAnswer === "string" && getMockDomain(elicitationAnswer) === "clothing-store";
+  const previousAnswers = parseMockPriorAnswers(
+    parsedInput && typeof parsedInput === "object" && "previousAnswers" in parsedInput
+      ? (parsedInput as { previousAnswers?: unknown }).previousAnswers
+      : undefined,
+  );
+  const refinementContext: MockRefinementContext = {
+    elicitationAnswer: typeof elicitationAnswer === "string" ? elicitationAnswer : "",
+    previousAnswers,
+  };
+  const domain = getMockDomain([
+    refinementContext.elicitationAnswer,
+    ...refinementContext.previousAnswers.flatMap((answer) => [answer.question, answer.answer]),
+  ].join(" "));
 
   if (!Array.isArray(ambiguities)) return refinementQuestionsSchema.parse({ questions: [] });
 
@@ -322,13 +347,89 @@ function mockRefinementQuestionsResponse(input: string) {
       const { id, description } = ambiguity as { id?: unknown; description?: unknown };
       if (typeof id !== "string" || typeof description !== "string") return [];
 
-      const clothingQuestion = isClothingContext ? getClothingRefinementQuestion(description) : undefined;
+      const clothingQuestion = domain === "clothing-store" ? getClothingRefinementQuestion(description) : undefined;
       return [{
         ambiguityId: id,
         question: clothingQuestion?.question ?? `Qual regra deve ser definida para esclarecer: ${description}`,
         reason: clothingQuestion?.reason ?? "A informação é necessária para reduzir interpretações diferentes do requisito.",
+        suggestedAnswer: clothingQuestion?.suggestedAnswer ?? getContextualSuggestedAnswer(domain, description, refinementContext),
       }];
     }),
+  });
+}
+
+function parseMockPriorAnswers(value: unknown): MockPriorAnswer[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const { question, answer } = item as { question?: unknown; answer?: unknown };
+    if (typeof question !== "string" || typeof answer !== "string") return [];
+
+    const normalizedQuestion = question.trim();
+    const normalizedAnswer = answer.trim();
+    return normalizedQuestion && normalizedAnswer ? [{ question: normalizedQuestion, answer: normalizedAnswer }] : [];
+  });
+}
+
+function getContextualSuggestedAnswer(domain: MockDomain, description: string, context: MockRefinementContext) {
+  const normalizedDescription = description.toLocaleLowerCase("pt-BR");
+  const normalizedContext = [
+    context.elicitationAnswer,
+    ...context.previousAnswers.flatMap((answer) => [answer.question, answer.answer]),
+  ].join(" ").toLocaleLowerCase("pt-BR");
+  const hasDetailedCommunicationAnswer = hasDetailedPriorAnswerForTopic(context.previousAnswers, ["mudança", "mudanca", "notifica", "comunica", "e-mail", "email"]);
+
+  if (includesAny(normalizedDescription, ["mudança", "mudanca", "notifica", "informado", "informada", "comunica"])
+    || includesAny(normalizedContext, ["mudança no fluxo", "mudanca no fluxo"])) {
+    return hasDetailedCommunicationAnswer
+      ? "Como proposta inicial, o sistema deve informar as mudanças diretamente na interface por meio de uma notificação clara, mantendo o canal complementar já indicado pelo usuário quando a alteração exigir uma ação."
+      : "Como proposta inicial, o sistema deve informar as mudanças diretamente na interface, por meio de uma notificação clara que descreva o que foi alterado e indique a próxima ação necessária. O uso de e-mail ou outros canais deve ser confirmado com o responsável pelo sistema.";
+  }
+
+  if (includesAny(normalizedDescription, ["autentic", "login", "acesso"])) {
+    return "Como proposta inicial, o sistema deve exigir que o usuário esteja autenticado antes de concluir uma ação que registre ou confirme dados em seu nome.";
+  }
+
+  if (normalizedDescription.includes("estoque")) {
+    return "Como proposta inicial, o sistema deve atualizar o estoque automaticamente após a confirmação da operação, registrando a quantidade movimentada para manter a disponibilidade correta.";
+  }
+
+  if (includesAny(normalizedDescription, ["tamanho", "cor", "variação", "variacao"])) {
+    return "Como proposta inicial, o sistema deve cadastrar cada variação do produto pela combinação de tamanho e cor e controlar sua disponibilidade separadamente.";
+  }
+
+  if (domain === "library") {
+    if (normalizedDescription.includes("reserva")) {
+      return "Como proposta para validação, a reserva deve registrar o usuário solicitante, o item e o prazo definido para retirada.";
+    }
+    if (normalizedDescription.includes("disponibilidade")) {
+      return "Como proposta para validação, a disponibilidade do item deve ser atualizada conforme a reserva, a retirada ou a devolução.";
+    }
+    return "Como proposta para validação, o sistema deve informar o usuário sobre as alterações relevantes na solicitação.";
+  }
+
+  if (includesAny(normalizedDescription, ["cancel", "agendamento", "horário", "horario"])) {
+    return "Como proposta inicial, o sistema deve permitir o cancelamento até um prazo definido antes do horário agendado e informar imediatamente o resultado da solicitação.";
+  }
+
+  if (includesAny(normalizedDescription, ["quem", "usuário", "usuario", "responsável", "responsavel", "permiss"])) {
+    return "Como proposta inicial, o sistema deve restringir essa ação aos usuários autenticados com perfil autorizado e informar quando o acesso não for permitido.";
+  }
+
+  return "Como proposta inicial, o sistema deve apresentar uma regra explícita para o fluxo afetado, informar claramente o resultado da ação ao usuário e permitir que o responsável valide essa proposta.";
+}
+
+function includesAny(text: string, terms: string[]) {
+  return terms.some((term) => text.includes(term));
+}
+
+function hasDetailedPriorAnswerForTopic(answers: MockPriorAnswer[], topics: string[]) {
+  return answers.some(({ question, answer }) => {
+    const normalizedAnswer = answer.trim().toLocaleLowerCase("pt-BR");
+    if (normalizedAnswer.split(/\s+/u).length < 4) return false;
+
+    return includesAny((question + " " + answer).toLocaleLowerCase("pt-BR"), topics);
   });
 }
 
