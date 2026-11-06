@@ -55,6 +55,8 @@ test("o detalhe do projeto lista sessões navegáveis e oferece a criação de u
     ]);
     assert.ok(view.getAllByRole("link", { name: "Nova sessão de elicitação" })
       .some((link) => link.getAttribute("href") === `/elicitacao?projectId=${projectId}&newSession=true`));
+    assert.equal(view.getAllByRole("button", { name: "Excluir sessão" }).length, 2);
+    assert.ok(view.getByRole("button", { name: "Excluir projeto" }));
   } finally {
     cleanup?.();
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });

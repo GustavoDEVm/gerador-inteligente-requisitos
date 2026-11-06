@@ -6,6 +6,7 @@ import { AIAnalysisPanel } from "@/components/ai/ai-analysis-panel";
 import { AmbiguityDetectionResults } from "@/components/ai/ambiguity-detection-results";
 import { GeneratedRequirementsResults } from "@/components/ai/generated-requirements-results";
 import { RefinementQuestionsResults, type RefinementQuestionDisplay } from "@/components/ai/refinement-questions-results";
+import { SessionDeletionDialog, type DeletedSession } from "@/components/elicitation/session-deletion-dialog";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,7 +21,7 @@ import { apiFetch } from "@/lib/api-client";
 import type { ProjectListItem } from "@/types/api";
 import type { AmbiguityDetectionResponse, PersistedRefinementQuestion, RefinementQuestionsResponse, RequirementsGenerationResponse } from "@/types/ai";
 
-type SessionItem = {
+export type SessionItem = {
   id: string;
   sequence: number;
   title: string | null;
@@ -88,6 +89,8 @@ export function ElicitationSession({
   const [refinementAnalysisId, setRefinementAnalysisId] = useState<string | null>(null);
   const [generatedResult, setGeneratedResult] = useState<RequirementsGenerationResponse | null>(null);
   const [refinedResult, setRefinedResult] = useState<RequirementsGenerationResponse | null>(null);
+  const [sessionDeletionOpen, setSessionDeletionOpen] = useState(false);
+  const [deletionMessage, setDeletionMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -260,6 +263,7 @@ export function ElicitationSession({
     setSessionId("");
     setQuestions([]);
     setCreatingNewSession(false);
+    setDeletionMessage(null);
     setError(null);
   }
 
@@ -275,6 +279,7 @@ export function ElicitationSession({
     setCurrentIndex(0);
     setAnswer("");
     setError(null);
+    setDeletionMessage(null);
   }
 
   function beginNewSession() {
@@ -284,6 +289,28 @@ export function ElicitationSession({
     setSessionTitle("");
     setInitialDescription("");
     setError(null);
+    setDeletionMessage(null);
+  }
+
+  function handleSessionDeleted(deletedSession: DeletedSession) {
+    const { remainingSessions, nextSession } = selectSessionAfterDeletion(sessions, deletedSession.id);
+    setSessions(remainingSessions);
+    setSessionId(nextSession?.id ?? "");
+    setQuestions([]);
+    setAnswers({});
+    setCurrentIndex(0);
+    setAnswer("");
+    setCreatingNewSession(false);
+    setAmbiguityResult(null);
+    setRefinementResult(null);
+    setRefinementAnalysisId(null);
+    setGeneratedResult(null);
+    setRefinedResult(null);
+    setSessionDeletionOpen(false);
+    setDeletionMessage("Sessão excluída permanentemente.");
+    if (typeof window !== "undefined") {
+      window.history.replaceState(window.history.state, "", sessionUrlAfterDeletion(window.location.href, nextSession?.id));
+    }
   }
 
   if (loading) return <Card className="p-6 text-sm text-slate-500">Carregando contexto de elicitação…</Card>;
@@ -292,7 +319,8 @@ export function ElicitationSession({
 
   const selectedSession = sessions.find((item) => item.id === sessionId);
   const contextSelector = (
-    <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-3">
+    <>
+    <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:grid-cols-4">
       <Select label="Projeto" value={projectId} onChange={(event) => selectProject(event.target.value)}>
         {projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
       </Select>
@@ -302,7 +330,17 @@ export function ElicitationSession({
           : sessions.map((item) => <option key={item.id} value={item.id}>{sessionLabel(item)}</option>)}
       </Select>
       <div className="flex items-end"><Button className="w-full" onClick={beginNewSession}><Icon name="plus" className="size-4" />Nova sessão de elicitação</Button></div>
+      <div className="flex items-end"><Button className="w-full" variant="danger" disabled={!selectedSession} onClick={() => setSessionDeletionOpen(true)}>Excluir sessão</Button></div>
     </div>
+    {deletionMessage ? <p className="text-sm text-emerald-700" role="status">{deletionMessage}</p> : null}
+    <SessionDeletionDialog
+      key={`${selectedSession?.id ?? "none"}-${sessionDeletionOpen ? "open" : "closed"}`}
+      open={sessionDeletionOpen}
+      session={selectedSession ?? null}
+      onClose={() => setSessionDeletionOpen(false)}
+      onDeleted={handleSessionDeleted}
+    />
+    </>
   );
 
   if (!sessionId || !question) {
@@ -426,6 +464,20 @@ export function ElicitationSession({
       </Dialog>
     </>
   );
+}
+
+export function selectSessionAfterDeletion(sessions: SessionItem[], deletedSessionId: string) {
+  const remainingSessions = sessions.filter((item) => item.id !== deletedSessionId);
+  const nextSession = remainingSessions.find((item) => item.status === "ACTIVE") ?? remainingSessions[0];
+  return { remainingSessions, nextSession };
+}
+
+export function sessionUrlAfterDeletion(currentHref: string, nextSessionId?: string) {
+  const url = new URL(currentHref);
+  url.searchParams.delete("newSession");
+  if (nextSessionId) url.searchParams.set("sessionId", nextSessionId);
+  else url.searchParams.delete("sessionId");
+  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 export function refinementQuestionsFromItems(

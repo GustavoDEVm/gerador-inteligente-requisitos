@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "../../generated/prisma/client";
 import { conflict, invalidInput, notFound } from "@/lib/api/errors";
+import { deleteSessionDependencies, ensureSessionHasNoActiveAnalyses, lockSessionForDeletion } from "@/services/deletion";
 import { logActivity, nextPosition, requireOwnedProject, requireOwnedQuestion, requireOwnedSession, requireUser } from "@/services/shared";
 
 type SessionStatus = "DRAFT" | "ACTIVE" | "COMPLETED" | "CANCELLED";
@@ -206,6 +207,16 @@ export async function updateSession(id: string, userId: string, data: { title?: 
       });
     }
     return session;
+  });
+}
+
+export async function deleteSession(id: string, userId: string) {
+  return prisma.$transaction(async (db) => {
+    const session = await requireOwnedSession(db, id, userId);
+    await lockSessionForDeletion(db, id);
+    await ensureSessionHasNoActiveAnalyses(db, id);
+    const deletedArtifacts = await deleteSessionDependencies(db, session);
+    return { id: session.id, projectId: session.projectId, ...deletedArtifacts };
   });
 }
 
