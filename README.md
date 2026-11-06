@@ -12,14 +12,16 @@ O projeto foi construído de forma incremental para tornar explícitas as decis�
 
 - Cadastro, login, logout e sessão protegida por cookie `HttpOnly`.
 - Autorização por proprietário para projetos e seus recursos relacionados.
-- Criação, consulta, edição, arquivamento e organização de projetos.
-- Sessões de elicitação com contexto inicial, perguntas e respostas versionadas.
+- Criação, consulta, edição, arquivamento e exclusão permanente confirmada de projetos.
+- Múltiplas sessões de elicitação por projeto, com contexto inicial, perguntas e respostas versionadas e histórico isolado por sessão.
 - Geração estruturada de User Story, requisitos funcionais e não funcionais e critérios de aceitação.
 - Detecção de ambiguidades e geração de perguntas de refinamento.
+- Sugestões de resposta contextualizadas para perguntas de refinamento, sempre apresentadas como proposta editável e nunca salvas automaticamente.
 - Reprocessamento dos requisitos com as respostas de refinamento, preservando a geração anterior.
 - Reidratação dos resultados persistidos ao abrir novamente uma sessão, sem executar IA automaticamente.
 - Proteção transacional contra duplicação de operações equivalentes de IA em andamento.
 - Edição manual de requisitos, User Stories e critérios de aceitação com histórico imutável de revisões. A remoção de critérios é um arquivamento lógico.
+- Exclusão confirmada de sessões, com remoção seletiva de dados exclusivos e preservação dos artefatos que ainda possuem origem em outra sessão.
 - Provider determinístico `mock` para desenvolvimento e testes sem chamadas externas, além do provider opcional Gemini.
 
 A exportação para PDF, DOCX e backlog não faz parte da versão atual.
@@ -61,7 +63,7 @@ src/
   types/        # Tipos e contratos compartilhados
 docs/           # Documentação técnica e acadêmica
 prisma/         # Schema, migrations e seed
-tests/          # Testes de API, persistência, IA e autenticação
+tests/          # Testes de API, persistência, componentes, IA e autenticação
 public/         # Recursos estáticos
 generated/      # Prisma Client gerado localmente; não versionado
 ```
@@ -190,11 +192,12 @@ Não use variáveis com prefixo `NEXT_PUBLIC_` para esses valores e não publiqu
 ## Fluxo de elicitação
 
 1. Crie ou selecione um projeto.
-2. Em `/elicitacao`, inicie uma sessão e informe o título opcional e a descrição inicial.
+2. Em `/elicitacao`, crie uma sessão com título opcional e descrição inicial, ou abra uma sessão já existente do projeto.
 3. Gere os requisitos estruturados a partir da resposta inicial persistida.
 4. Detecte ambiguidades e gere perguntas de refinamento.
-5. Responda às perguntas apresentadas para a execução relevante da sessão.
-6. Execute o refinamento para gerar uma nova análise e novos artefatos, preservando os anteriores.
+5. Revise, edite ou apague a sugestão de resposta proposta pela IA; ela só se torna uma resposta versionada após o salvamento explícito.
+6. Responda às perguntas apresentadas para a execução relevante da sessão.
+7. Execute o refinamento para gerar uma nova análise e novos artefatos, preservando os anteriores.
 
 Ao recarregar a sessão, a aplicação recupera as análises, perguntas, respostas e resultados persistidos sem disparar uma nova chamada de IA. Requisitos, User Stories e critérios de aceitação preservam revisões imutáveis das edições manuais; respostas de elicitação também são versionadas.
 
@@ -202,8 +205,8 @@ Ao recarregar a sessão, a aplicação recupera as análises, perguntas, respost
 
 - `/`: dashboard com indicadores derivados dos dados persistidos do usuário autenticado.
 - `/configuracoes`: informações sobre persistência e a camada de IA já disponíveis.
-- `/projetos`, `/projetos/novo` e `/projetos/[id]`: gerenciamento dos projetos do usuário.
-- `/elicitacao`: sessão, geração de requisitos, ambiguidades, perguntas e refinamento.
+- `/projetos`, `/projetos/novo` e `/projetos/[id]`: gerenciamento, arquivamento e exclusão confirmada dos projetos do usuário.
+- `/elicitacao`: criação, seleção e exclusão de sessões; geração de requisitos, ambiguidades, perguntas, sugestões de resposta e refinamento.
 - `/requisitos` e `/user-stories`: consulta e organização dos artefatos persistidos.
 - `/login` e `/cadastro`: autenticação.
 
@@ -212,6 +215,8 @@ Ao recarregar a sessão, a aplicação recupera as análises, perguntas, respost
 O modelo relacional está documentado em [docs/data-model.md](docs/data-model.md) e implementado em `prisma/schema.prisma`. Projetos, sessões, perguntas, respostas, análises de IA, requisitos, User Stories, critérios, ambiguidades, sugestões e atividades são persistidos no PostgreSQL.
 
 Cada geração ou refinamento cria uma `AIAnalysis` independente. As fontes relevantes dos requisitos são associadas às respostas de elicitação e às análises que os originaram. Alterações manuais de requisitos, User Stories e critérios geram snapshots imutáveis com número de revisão, operação, autor quando disponível e data; critérios excluídos são arquivados logicamente.
+
+O arquivamento lógico continua disponível para projetos e critérios. A exclusão permanente de projeto exige confirmação do nome e remove, em uma transação, o agregado daquele projeto. A exclusão de uma sessão remove seus dados exclusivos, mas mantém requisitos e User Stories que também possuem fontes válidas em outras sessões do mesmo projeto.
 
 ## Testes e validações
 

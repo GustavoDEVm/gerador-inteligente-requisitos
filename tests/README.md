@@ -1,12 +1,12 @@
 # Testes automatizados
 
-Os testes ficam em `tests/api` e são executados pelo script definido no `package.json`:
+Os testes ficam em `tests/api` e `tests/components` e são executados pelo script definido no `package.json`:
 
 ```bash
 npm run test
 ```
 
-O comando executa `tsx --test tests/api/*.test.ts`.
+O comando executa `tsx --test tests/api/*.test.ts tests/components/*.test.ts`.
 
 ## Pré-requisitos
 
@@ -30,6 +30,10 @@ Os testes de API e persistência dependem do banco configurado em `DATABASE_URL`
 
 Como precaução, use um banco local de desenvolvimento ou de testes, e não um banco compartilhado de produção.
 
+## Testes de componentes
+
+Os testes em `tests/components` usam `node:test`, `tsx`, JSDOM e Testing Library. O helper `tests/helpers/dom.ts` instala um DOM isolado por teste e aguarda o encerramento das tarefas pendentes do React/JSDOM antes de restaurar os globais. Não é necessário navegador, servidor Next.js ou chamada de rede externa para executá-los.
+
 ## IA durante os testes
 
 Os testes automatizados usam providers falsos ou o `MockAIProvider`. Nenhuma chamada real é enviada ao Gemini, nenhuma chave Gemini é necessária e nenhuma quota externa é consumida.
@@ -45,9 +49,12 @@ AI_PROVIDER=mock
 - Persistência e contratos de API para usuários, projetos, stakeholders, sessões, perguntas, respostas, requisitos, User Stories, critérios, ambiguidades e sugestões.
 - Cadastro, login, logout, sessão e autorização por proprietário.
 - Início de sessão de elicitação e versionamento de respostas.
-- Geração de requisitos, detecção de ambiguidades, perguntas de refinamento e refinamento dos requisitos com provider simulado.
+- Criação, seleção e isolamento de múltiplas sessões de elicitação, inclusive a inicialização segura de sessões em rascunho.
+- Geração de requisitos, detecção de ambiguidades, perguntas de refinamento, sugestões de resposta e refinamento dos requisitos com provider simulado.
 - Reidratação de análises persistidas e prevenção de duplicação de operações equivalentes de IA.
 - Revisões imutáveis de requisitos, User Stories e critérios de aceitação, incluindo arquivamento lógico de critérios e operações concorrentes.
+- Exclusão autorizada de projetos e sessões, incluindo preservação de artefatos compartilhados por outras sessões.
+- Interface de elicitação: reidratação, perguntas respondidas, sugestões editáveis e alternância entre sessões sem chamadas automáticas à IA.
 
 ## Validações disponíveis
 

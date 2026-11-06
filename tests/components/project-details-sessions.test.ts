@@ -60,6 +60,6 @@ test("o detalhe do projeto lista sessões navegáveis e oferece a criação de u
   } finally {
     cleanup?.();
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
-    restoreDom();
+    await restoreDom();
   }
 });

@@ -144,6 +144,6 @@ test("a sugestão é um rascunho editável e só se torna resposta após o salva
       writable: true,
       value: originalFetch,
     });
-    restoreDom();
+    await restoreDom();
   }
 });

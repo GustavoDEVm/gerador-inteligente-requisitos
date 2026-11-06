@@ -48,7 +48,7 @@ test("a confirmação de exclusão de projeto exige o nome exato antes de chamar
   } finally {
     cleanup?.();
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
-    restoreDom();
+    await restoreDom();
   }
 });
 
@@ -89,7 +89,7 @@ test("a confirmação de exclusão de sessão informa a remoção seletiva e atu
   } finally {
     cleanup?.();
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
-    restoreDom();
+    await restoreDom();
   }
 });
 
@@ -115,4 +115,3 @@ test("a seleção e a URL removem a sessão excluída e preferem outra sessão a
     "/elicitacao?projectId=project-1",
   );
 });
-

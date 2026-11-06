@@ -142,7 +142,7 @@ test("a sessão de elicitação reidrata visualmente respostas e resultados sem 
       writable: true,
       value: originalFetch,
     });
-    restoreDom();
+    await restoreDom();
   }
 });
 

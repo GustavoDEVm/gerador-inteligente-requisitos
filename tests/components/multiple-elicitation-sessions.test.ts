@@ -49,7 +49,7 @@ test("abre exclusivamente a sessão indicada na URL e preserva a seleção atual
   } finally {
     cleanup?.();
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
-    restoreDom();
+    await restoreDom();
   }
 });
 
@@ -93,7 +93,7 @@ test("cria uma nova sessão pelo endpoint de início e seleciona o resultado", a
   } finally {
     cleanup?.();
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
-    restoreDom();
+    await restoreDom();
   }
 });
 
@@ -141,7 +141,7 @@ test("inicializa um rascunho existente sem criar uma sessão adicional", async (
   } finally {
     cleanup?.();
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
-    restoreDom();
+    await restoreDom();
   }
 });
 
@@ -201,7 +201,7 @@ test("alterna sessões sem misturar perguntas ou sugestões de respostas", async
     unmount?.();
     cleanup?.();
     Object.defineProperty(globalThis, "fetch", { configurable: true, writable: true, value: originalFetch });
-    restoreDom();
+    await restoreDom();
   }
 });
 
