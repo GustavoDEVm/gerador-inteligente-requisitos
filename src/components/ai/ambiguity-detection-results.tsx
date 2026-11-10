@@ -5,6 +5,7 @@ import type { AmbiguityDetectionResponse, DetectedAmbiguitySeverity } from "@/ty
 
 type AmbiguityDetectionResultsProps = {
   result: AmbiguityDetectionResponse;
+  outdated?: boolean;
 };
 
 const severityPresentation: Record<DetectedAmbiguitySeverity, { label: string; tone: "blue" | "amber" | "red" }> = {
@@ -13,7 +14,7 @@ const severityPresentation: Record<DetectedAmbiguitySeverity, { label: string; t
   high: { label: "Alta", tone: "red" },
 };
 
-export function AmbiguityDetectionResults({ result }: AmbiguityDetectionResultsProps) {
+export function AmbiguityDetectionResults({ result, outdated = false }: AmbiguityDetectionResultsProps) {
   const { ambiguities } = result.result;
 
   return (
@@ -35,6 +36,11 @@ export function AmbiguityDetectionResults({ result }: AmbiguityDetectionResultsP
           </div>
         </div>
 
+        {outdated && (
+          <p className="border-b border-amber-100 bg-amber-50 px-5 py-3 text-sm text-amber-900" role="status">
+            {"Resultados desatualizados. A ideia inicial foi alterada; detecte novamente as ambiguidades para atualizar a an\u00e1lise."}
+          </p>
+        )}
         {ambiguities.length === 0 ? (
           <div className="flex gap-3 p-5 sm:p-7">
             <Icon name="check-circle" className="mt-0.5 size-5 shrink-0 text-emerald-600" />

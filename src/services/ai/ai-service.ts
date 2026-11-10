@@ -282,6 +282,7 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
       const persistedResult = await this.persistDetectedAmbiguities({
         analysisId: runningAnalysis.id,
         input,
+        analysisInput: runningAnalysis.input,
         provider: provider.name,
         model: generated.model,
         result: result.data,
@@ -485,7 +486,7 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
         answers: {
           orderBy: { version: "desc" },
           take: 1,
-          select: { id: true, content: true },
+          select: { id: true, content: true, version: true },
         },
       },
     });
@@ -495,7 +496,17 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
       throw invalidInput(`Registre uma resposta de elicitação com pelo menos 20 caracteres antes de ${action}.`);
     }
 
-    return { input: answer.content.trim(), sourceAnswerId: answer.id };
+    const resolvedInput = answer.content.trim();
+    return {
+      input: resolvedInput,
+      sourceAnswerId: answer.id,
+      inputSnapshot: {
+        sessionId: session.id,
+        sourceAnswerId: answer.id,
+        sourceAnswerVersion: answer.version,
+        input: resolvedInput,
+      },
+    };
   }
 
   private async resolveRefinementQuestionsInput(
@@ -503,33 +514,6 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
     session: { id: string; projectId: string },
   ): Promise<ResolvedAnalysisInput> {
     const elicitationAnswer = await this.resolveInitialElicitationAnswer(db, session, "gerar perguntas de refinamento");
-    const answeredQuestions = await db.elicitationQuestion.findMany({
-      where: {
-        sessionId: session.id,
-        answers: { some: {} },
-      },
-      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
-      select: {
-        id: true,
-        content: true,
-        answers: {
-          orderBy: { version: "desc" },
-          take: 1,
-          select: { id: true, content: true },
-        },
-      },
-    });
-    const previousAnswers = answeredQuestions.flatMap((question) => {
-      const answer = question.answers[0];
-      if (!answer || answer.id === elicitationAnswer.sourceAnswerId || answer.content.trim().length === 0) return [];
-
-      return [{
-        questionId: question.id,
-        question: question.content,
-        answerId: answer.id,
-        answer: answer.content.trim(),
-      }];
-    });
     const latestAmbiguityAnalysis = await db.aIAnalysis.findFirst({
       where: {
         projectId: session.projectId,
@@ -537,7 +521,7 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
         status: "SUCCEEDED",
         sessions: { some: { sessionId: session.id } },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       select: { id: true },
     });
     const ambiguities = latestAmbiguityAnalysis ? await db.ambiguity.findMany({
@@ -560,10 +544,52 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
       severity: toDetectedAmbiguitySeverity(ambiguity.severity),
       context: getAmbiguityContext(ambiguity.description, ambiguity.severity, ambiguity.generatedByAnalysis?.structuredOutput),
     }));
+    const currentAmbiguityIds = new Set(refinementAmbiguities.map((ambiguity) => ambiguity.id));
+    const answeredQuestions = await db.elicitationQuestion.findMany({
+      where: {
+        sessionId: session.id,
+        answers: { some: {} },
+      },
+      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true,
+        content: true,
+        source: true,
+        generatedByAnalysis: { select: { inputSnapshot: true, structuredOutput: true } },
+        answers: {
+          orderBy: { version: "desc" },
+          take: 1,
+          select: { id: true, content: true },
+        },
+      },
+    });
+    const previousAnswers = answeredQuestions.flatMap((question) => {
+      const answer = question.answers[0];
+      const isCurrentRefinementQuestion = question.source === "AI"
+        && isQuestionAnalysisForAmbiguitySet(
+          question.generatedByAnalysis,
+          latestAmbiguityAnalysis?.id ?? null,
+          currentAmbiguityIds,
+        );
+      if (
+        !answer
+        || answer.id === elicitationAnswer.sourceAnswerId
+        || answer.content.trim().length === 0
+        || (question.source === "AI" && !isCurrentRefinementQuestion)
+      ) return [];
+
+      return [{
+        questionId: question.id,
+        question: question.content,
+        answerId: answer.id,
+        answer: answer.content.trim(),
+      }];
+    });
     const inputSnapshot = {
       elicitationAnswer: elicitationAnswer.input,
       sessionId: session.id,
       sourceAnswerId: elicitationAnswer.sourceAnswerId ?? null,
+      ambiguityAnalysisId: latestAmbiguityAnalysis?.id ?? null,
       previousAnswers,
       ambiguities: refinementAmbiguities,
     } as Prisma.InputJsonValue;
@@ -585,16 +611,16 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
     session: { id: string; projectId: string },
   ): Promise<ResolvedAnalysisInput> {
     const initialElicitationAnswer = await this.resolveInitialElicitationAnswer(db, session, "refinar requisitos");
-    const [latestQuestionAnalysis, latestAmbiguityAnalysis] = await Promise.all([
-      db.aIAnalysis.findFirst({
+    const [questionAnalyses, latestAmbiguityAnalysis] = await Promise.all([
+      db.aIAnalysis.findMany({
         where: {
           projectId: session.projectId,
           type: "QUESTION_GENERATION",
           status: "SUCCEEDED",
           sessions: { some: { sessionId: session.id } },
         },
-        orderBy: { createdAt: "desc" },
-        select: { id: true },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: { id: true, inputSnapshot: true, structuredOutput: true },
       }),
       db.aIAnalysis.findFirst({
         where: {
@@ -603,37 +629,19 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
           status: "SUCCEEDED",
           sessions: { some: { sessionId: session.id } },
         },
-        orderBy: { createdAt: "desc" },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         select: { id: true },
       }),
     ]);
 
-    if (!latestQuestionAnalysis || !latestAmbiguityAnalysis) {
+    if (!latestAmbiguityAnalysis) {
       throw invalidInput("Detecte ambiguidades e gere perguntas de refinamento antes de refinar os requisitos.");
     }
 
-    const [latestAmbiguities, generatedQuestions, previousUserStory] = await Promise.all([
+    const [latestAmbiguities, previousUserStory] = await Promise.all([
       db.ambiguity.findMany({
         where: { projectId: session.projectId, generatedByAnalysisId: latestAmbiguityAnalysis.id },
         select: { id: true },
-      }),
-      db.elicitationQuestion.findMany({
-        where: {
-          sessionId: session.id,
-          source: "AI",
-          generatedByAnalysisId: latestQuestionAnalysis.id,
-        },
-        select: {
-          id: true,
-          content: true,
-          generatedByAnalysis: { select: { structuredOutput: true } },
-          answers: {
-            orderBy: { version: "desc" },
-            take: 1,
-            select: { id: true, content: true },
-          },
-        },
-        orderBy: { position: "asc" },
       }),
       db.userStory.findFirst({
         where: {
@@ -667,6 +675,33 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
     }
 
     const latestAmbiguityIds = new Set(latestAmbiguities.map((ambiguity) => ambiguity.id));
+    const latestQuestionAnalysis = questionAnalyses.find((analysis) => isQuestionAnalysisForAmbiguitySet(
+      analysis,
+      latestAmbiguityAnalysis.id,
+      latestAmbiguityIds,
+    ));
+    if (!latestQuestionAnalysis) {
+      throw invalidInput("Gere perguntas de refinamento para as ambiguidades atuais antes de refinar os requisitos.");
+    }
+
+    const generatedQuestions = await db.elicitationQuestion.findMany({
+      where: {
+        sessionId: session.id,
+        source: "AI",
+        generatedByAnalysisId: latestQuestionAnalysis.id,
+      },
+      select: {
+        id: true,
+        content: true,
+        generatedByAnalysis: { select: { structuredOutput: true } },
+        answers: {
+          orderBy: { version: "desc" },
+          take: 1,
+          select: { id: true, content: true },
+        },
+      },
+      orderBy: { position: "asc" },
+    });
     const refinementQuestions = generatedQuestions.filter((question) => {
       const ambiguityId = getRefinementQuestionAmbiguityId(question.generatedByAnalysis?.structuredOutput, question.id);
       return ambiguityId !== null && latestAmbiguityIds.has(ambiguityId);
@@ -739,17 +774,26 @@ export class AIService implements AnalyzeSystemDescriptionUseCase, GenerateRequi
   private async persistDetectedAmbiguities({
     analysisId,
     input,
+    analysisInput,
     provider,
     model,
     result,
   }: {
     analysisId: string;
     input: DetectAmbiguitiesInput;
+    analysisInput: string;
     provider: string;
     model: string;
     result: AmbiguityDetectionResult;
   }): Promise<AmbiguityDetectionResult> {
-    const persistedResult = { ambiguities: deduplicateAmbiguities(result.ambiguities) };
+    const persistedResult = {
+      ambiguities: deduplicateAmbiguities(result.ambiguities).map((ambiguity) => ({
+        ...ambiguity,
+        // The panel must show the exact version of the initial answer that
+        // was used by this analysis, never a context from another execution.
+        context: analysisInput,
+      })),
+    };
 
     return this.db.$transaction(async (db) => {
       const timing = { analysisId, operation: "detect-ambiguities" };
@@ -1139,12 +1183,23 @@ function toDetectedAmbiguitySeverity(severity: "LOW" | "MEDIUM" | "HIGH"): Detec
 }
 
 function getAmbiguityContext(description: string, severity: "LOW" | "MEDIUM" | "HIGH", structuredOutput: Prisma.JsonValue | null | undefined): string | null {
-  const parsedOutput = ambiguityDetectionSchema.safeParse(structuredOutput);
-  if (!parsedOutput.success) return null;
+  // The provider output is validated before persistence. The service then
+  // replaces `context` with the exact initial answer snapshot, which can be
+  // longer than the provider schema's 1,000-character presentation limit.
+  // Read only the fields needed for the persisted traceability projection.
+  if (!structuredOutput || typeof structuredOutput !== "object" || !("ambiguities" in structuredOutput)) return null;
+  const ambiguities = (structuredOutput as Prisma.JsonObject).ambiguities;
+  if (!Array.isArray(ambiguities)) return null;
 
-  return parsedOutput.data.ambiguities.find((ambiguity) => (
-    ambiguity.description === description && ambiguity.severity === toDetectedAmbiguitySeverity(severity)
-  ))?.context ?? null;
+  const ambiguity = ambiguities.find((item): item is Prisma.JsonObject => (
+    item !== null
+    && typeof item === "object"
+    && !Array.isArray(item)
+    && item.description === description
+    && item.severity === toDetectedAmbiguitySeverity(severity)
+  ));
+
+  return ambiguity && typeof ambiguity.context === "string" ? ambiguity.context : null;
 }
 
 function deduplicateRefinementQuestions(questions: RefinementQuestionAIResult["questions"]) {
@@ -1171,6 +1226,36 @@ function getRefinementQuestionAmbiguityId(value: Prisma.JsonValue | null | undef
     item !== null && typeof item === "object" && !Array.isArray(item) && item.questionId === questionId
   ));
   return question && typeof question.ambiguityId === "string" ? question.ambiguityId : null;
+}
+
+function isQuestionAnalysisForAmbiguitySet(
+  analysis: { inputSnapshot: Prisma.JsonValue; structuredOutput: Prisma.JsonValue | null } | null,
+  ambiguityAnalysisId: string | null,
+  ambiguityIds: Set<string>,
+) {
+  if (!analysis || !ambiguityAnalysisId || ambiguityIds.size === 0) return false;
+  if (getQuestionGenerationAmbiguityAnalysisId(analysis.inputSnapshot) === ambiguityAnalysisId) return true;
+
+  return getRefinementQuestionAmbiguityIds(analysis.structuredOutput).some((id) => ambiguityIds.has(id));
+}
+
+function getQuestionGenerationAmbiguityAnalysisId(value: Prisma.JsonValue | null | undefined): string | null {
+  if (!value || typeof value !== "object" || !("ambiguityAnalysisId" in value)) return null;
+  const ambiguityAnalysisId = (value as Prisma.JsonObject).ambiguityAnalysisId;
+  return typeof ambiguityAnalysisId === "string" ? ambiguityAnalysisId : null;
+}
+
+function getRefinementQuestionAmbiguityIds(value: Prisma.JsonValue | null | undefined) {
+  if (!value || typeof value !== "object" || !("questions" in value) || !Array.isArray(value.questions)) return [];
+
+  return value.questions.flatMap((question) => (
+    question !== null
+    && typeof question === "object"
+    && !Array.isArray(question)
+    && typeof (question as Prisma.JsonObject).ambiguityId === "string"
+      ? [(question as Prisma.JsonObject).ambiguityId as string]
+      : []
+  ));
 }
 
 function confirmsOrderAuthentication(question: string, answer: string) {

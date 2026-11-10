@@ -40,6 +40,7 @@ export async function getSession(id: string, userId: string) {
               id: true,
               type: true,
               status: true,
+              inputSnapshot: true,
               structuredOutput: true,
               createdAt: true,
             },
@@ -49,7 +50,8 @@ export async function getSession(id: string, userId: string) {
     },
   });
   if (!session) throw notFound("Sessão de elicitação");
-  return session;
+  const currentAnalysisSelection = await getCurrentSessionAnalysisSelection(session);
+  return { ...session, ...currentAnalysisSelection };
 }
 
 export async function createSession(projectId: string, userId: string, data: { title?: string; context: string; status?: SessionStatus; sequence?: number }) {
@@ -222,27 +224,8 @@ export async function deleteSession(id: string, userId: string) {
 
 export async function listQuestions(sessionId: string, userId: string) {
   const session = await requireOwnedSession(prisma, sessionId, userId);
-  const [latestRequirementsRefinement, latestAmbiguityAnalysis, questions] = await Promise.all([
-    prisma.aIAnalysis.findFirst({
-      where: {
-        projectId: session.projectId,
-        type: "REFINEMENT",
-        status: "SUCCEEDED",
-        sessions: { some: { sessionId } },
-      },
-      orderBy: { createdAt: "desc" },
-      select: { inputSnapshot: true },
-    }),
-    prisma.aIAnalysis.findFirst({
-      where: {
-        projectId: session.projectId,
-        type: "AMBIGUITY_DETECTION",
-        status: "SUCCEEDED",
-        sessions: { some: { sessionId } },
-      },
-      orderBy: { createdAt: "desc" },
-      select: { id: true },
-    }),
+  const [selection, questions] = await Promise.all([
+    getCurrentSessionAnalysisSelection(session),
     prisma.elicitationQuestion.findMany({
       where: { sessionId },
       include: {
@@ -253,45 +236,78 @@ export async function listQuestions(sessionId: string, userId: string) {
     }),
   ]);
 
-  const refinementQuestionAnalysisId = getRefinementQuestionAnalysisId(latestRequirementsRefinement?.inputSnapshot);
-  const questionAnalysisWhere = {
-    projectId: session.projectId,
-    type: "QUESTION_GENERATION" as const,
-    status: "SUCCEEDED" as const,
-    sessions: { some: { sessionId } },
-  };
-  const referencedQuestionAnalysis = refinementQuestionAnalysisId
-    ? await prisma.aIAnalysis.findFirst({ where: { ...questionAnalysisWhere, id: refinementQuestionAnalysisId }, select: { id: true } })
-    : null;
-  const selectedQuestionAnalysis = referencedQuestionAnalysis ?? await prisma.aIAnalysis.findFirst({
-    where: questionAnalysisWhere,
-    orderBy: { createdAt: "desc" },
+  return attachRefinementQuestionSuggestions(questions.filter((question) => (
+    question.source !== "AI" || question.generatedByAnalysisId === selection.currentRefinementQuestionAnalysisId
+  )));
+}
+
+type SessionAnalysisSelection = {
+  currentAmbiguityAnalysisId: string | null;
+  currentRefinementQuestionAnalysisId: string | null;
+};
+
+async function getCurrentSessionAnalysisSelection(session: { id: string; projectId: string }): Promise<SessionAnalysisSelection> {
+  const currentAmbiguityAnalysis = await prisma.aIAnalysis.findFirst({
+    where: {
+      projectId: session.projectId,
+      type: "AMBIGUITY_DETECTION",
+      status: "SUCCEEDED",
+      sessions: { some: { sessionId: session.id } },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     select: { id: true },
   });
 
-  if (!selectedQuestionAnalysis) return attachRefinementQuestionSuggestions(questions.filter((question) => question.source !== "AI"));
-
-  if (referencedQuestionAnalysis) {
-    return attachRefinementQuestionSuggestions(
-      questions.filter((question) => question.source !== "AI" || question.generatedByAnalysisId === referencedQuestionAnalysis.id),
-    );
+  if (!currentAmbiguityAnalysis) {
+    return { currentAmbiguityAnalysisId: null, currentRefinementQuestionAnalysisId: null };
   }
 
-  const latestAmbiguityIds = latestAmbiguityAnalysis
-    ? new Set((await prisma.ambiguity.findMany({
-      where: { projectId: session.projectId, generatedByAnalysisId: latestAmbiguityAnalysis.id },
-      select: { id: true },
-    })).map((ambiguity) => ambiguity.id))
-    : null;
+  const currentAmbiguityIds = new Set((await prisma.ambiguity.findMany({
+    where: { projectId: session.projectId, generatedByAnalysisId: currentAmbiguityAnalysis.id },
+    select: { id: true },
+  })).map((ambiguity) => ambiguity.id));
+  if (currentAmbiguityIds.size === 0) {
+    return { currentAmbiguityAnalysisId: currentAmbiguityAnalysis.id, currentRefinementQuestionAnalysisId: null };
+  }
 
-  return attachRefinementQuestionSuggestions(questions.filter((question) => {
-    if (question.source !== "AI") return true;
-    if (question.generatedByAnalysisId !== selectedQuestionAnalysis.id) return false;
-    if (!latestAmbiguityIds) return true;
+  const questionAnalyses = await prisma.aIAnalysis.findMany({
+    where: {
+      projectId: session.projectId,
+      type: "QUESTION_GENERATION",
+      status: "SUCCEEDED",
+      sessions: { some: { sessionId: session.id } },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true, inputSnapshot: true, structuredOutput: true },
+  });
+  const currentQuestionAnalyses = questionAnalyses.filter((analysis) => isQuestionAnalysisForAmbiguitySet(
+    analysis,
+    currentAmbiguityAnalysis.id,
+    currentAmbiguityIds,
+  ));
+  if (currentQuestionAnalyses.length === 0) {
+    return { currentAmbiguityAnalysisId: currentAmbiguityAnalysis.id, currentRefinementQuestionAnalysisId: null };
+  }
 
-    const ambiguityId = getRefinementQuestionAmbiguityId(question.generatedByAnalysis?.structuredOutput, question.id);
-    return ambiguityId !== null && latestAmbiguityIds.has(ambiguityId);
-  }));
+  const currentQuestionAnalysisIds = new Set(currentQuestionAnalyses.map((analysis) => analysis.id));
+  const refinements = await prisma.aIAnalysis.findMany({
+    where: {
+      projectId: session.projectId,
+      type: "REFINEMENT",
+      status: "SUCCEEDED",
+      sessions: { some: { sessionId: session.id } },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { inputSnapshot: true },
+  });
+  const refinementQuestionAnalysisId = refinements
+    .map((analysis) => getRefinementQuestionAnalysisId(analysis.inputSnapshot))
+    .find((analysisId): analysisId is string => analysisId !== null && currentQuestionAnalysisIds.has(analysisId));
+
+  return {
+    currentAmbiguityAnalysisId: currentAmbiguityAnalysis.id,
+    currentRefinementQuestionAnalysisId: refinementQuestionAnalysisId ?? currentQuestionAnalyses[0]!.id,
+  };
 }
 
 function getRefinementQuestionAnalysisId(value: unknown): string | null {
@@ -300,12 +316,30 @@ function getRefinementQuestionAnalysisId(value: unknown): string | null {
   return typeof analysisId === "string" ? analysisId : null;
 }
 
-function getRefinementQuestionAmbiguityId(value: unknown, questionId: string): string | null {
-  if (!value || typeof value !== "object" || !("questions" in value) || !Array.isArray(value.questions)) return null;
-  const question = value.questions.find((item): item is Record<string, unknown> => (
-    Boolean(item) && typeof item === "object" && (item as Record<string, unknown>).questionId === questionId
-  ));
-  return question && typeof question.ambiguityId === "string" ? question.ambiguityId : null;
+function isQuestionAnalysisForAmbiguitySet(
+  analysis: { inputSnapshot: unknown; structuredOutput: unknown },
+  ambiguityAnalysisId: string,
+  ambiguityIds: Set<string>,
+) {
+  if (getQuestionGenerationAmbiguityAnalysisId(analysis.inputSnapshot) === ambiguityAnalysisId) return true;
+
+  return getRefinementQuestionAmbiguityIds(analysis.structuredOutput).some((ambiguityId) => ambiguityIds.has(ambiguityId));
+}
+
+function getQuestionGenerationAmbiguityAnalysisId(value: unknown): string | null {
+  if (!value || typeof value !== "object" || !("ambiguityAnalysisId" in value)) return null;
+  const analysisId = (value as Record<string, unknown>).ambiguityAnalysisId;
+  return typeof analysisId === "string" ? analysisId : null;
+}
+
+function getRefinementQuestionAmbiguityIds(value: unknown) {
+  if (!value || typeof value !== "object" || !("questions" in value) || !Array.isArray(value.questions)) return [];
+
+  return value.questions.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const ambiguityId = (item as Record<string, unknown>).ambiguityId;
+    return typeof ambiguityId === "string" ? [ambiguityId] : [];
+  });
 }
 
 function attachRefinementQuestionSuggestions<T extends {

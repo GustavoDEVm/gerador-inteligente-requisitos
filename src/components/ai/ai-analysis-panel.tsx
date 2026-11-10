@@ -6,17 +6,23 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Icon } from "@/components/ui/icon";
 import { apiFetch } from "@/lib/api-client";
-import type { AmbiguityDetectionResponse, RefinementQuestionsResponse, RequirementsGenerationResponse } from "@/types/ai";
+import type { RefinementQuestionsResponse, RequirementsGenerationResponse } from "@/types/ai";
+
+type AmbiguityRefreshState = "idle" | "waiting" | "running" | "failed";
 
 export function AIAnalysisPanel({
   projectId,
   sessionId,
   hasSufficientElicitationAnswer,
+  isElicitationAnswerSaving,
+  hasOutdatedAmbiguityResult,
+  ambiguityRefreshState,
+  ambiguityRefreshError,
   hasAmbiguityResult,
   hasRefinementQuestions,
   hasCompleteRefinementAnswers,
   hasGeneratedResult,
-  onAmbiguitiesDetected,
+  onDetectAmbiguities,
   onRefinementQuestionsGenerated,
   onGenerated,
   onRequirementsRefined,
@@ -24,11 +30,15 @@ export function AIAnalysisPanel({
   projectId: string;
   sessionId: string;
   hasSufficientElicitationAnswer: boolean;
+  isElicitationAnswerSaving: boolean;
+  hasOutdatedAmbiguityResult: boolean;
+  ambiguityRefreshState: AmbiguityRefreshState;
+  ambiguityRefreshError: string | null;
   hasAmbiguityResult: boolean;
   hasRefinementQuestions: boolean;
   hasCompleteRefinementAnswers: boolean;
   hasGeneratedResult: boolean;
-  onAmbiguitiesDetected: (result: AmbiguityDetectionResponse) => void;
+  onDetectAmbiguities: () => Promise<void>;
   onRefinementQuestionsGenerated: (result: RefinementQuestionsResponse) => void;
   onGenerated: (result: RequirementsGenerationResponse) => void;
   onRequirementsRefined: (result: RequirementsGenerationResponse) => void;
@@ -36,6 +46,8 @@ export function AIAnalysisPanel({
   const [operation, setOperation] = useState<"ambiguities" | "refinement-questions" | "requirements" | "requirements-refinement" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const processing = operation !== null;
+  const detectingAmbiguities = operation === "ambiguities" || ambiguityRefreshState === "running";
+  const analysisOperationInProgress = processing || ambiguityRefreshState === "running";
 
   async function generateRequirements() {
     if (!hasSufficientElicitationAnswer || processing) return;
@@ -61,11 +73,7 @@ export function AIAnalysisPanel({
     setOperation("ambiguities");
     setError(null);
     try {
-      const result = await apiFetch<AmbiguityDetectionResponse>("/api/ai/detect-ambiguities", {
-        method: "POST",
-        body: JSON.stringify({ projectId, sessionId }),
-      });
-      onAmbiguitiesDetected(result);
+      await onDetectAmbiguities();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Não foi possível detectar ambiguidades com IA.");
     } finally {
@@ -123,21 +131,21 @@ export function AIAnalysisPanel({
           Registre uma resposta de elicitação com pelo menos 20 caracteres antes de gerar requisitos.
         </p>
       )}
-      {error && <p className="mt-3 text-sm text-red-700" role="alert">{error}</p>}
+      {(error ?? ambiguityRefreshError) && <p className="mt-3 text-sm text-red-700" role="alert">{error ?? ambiguityRefreshError}</p>}
       <div className="mt-4 grid gap-2">
-        <Button variant="secondary" className="w-full" disabled={!hasSufficientElicitationAnswer || processing} onClick={detectAmbiguities}>
+        <Button variant="secondary" className="w-full" disabled={!hasSufficientElicitationAnswer || isElicitationAnswerSaving || analysisOperationInProgress} onClick={detectAmbiguities}>
           <Icon name="alert-triangle" className="size-4" />
-          {operation === "ambiguities" ? "Detectando ambiguidades…" : "Detectar ambiguidades"}
+          {detectingAmbiguities ? "Detectando ambiguidades…" : "Detectar ambiguidades"}
         </Button>
-        <Button variant="secondary" className="w-full" disabled={!hasSufficientElicitationAnswer || processing} onClick={generateRefinementQuestions}>
+        <Button variant="secondary" className="w-full" disabled={!hasSufficientElicitationAnswer || hasOutdatedAmbiguityResult || isElicitationAnswerSaving || analysisOperationInProgress} onClick={generateRefinementQuestions}>
           <Icon name="message-square" className="size-4" />
           {operation === "refinement-questions" ? "Gerando perguntas…" : "Gerar perguntas de refinamento"}
         </Button>
-        <Button className="w-full" disabled={!hasSufficientElicitationAnswer || processing} onClick={generateRequirements}>
+        <Button className="w-full" disabled={!hasSufficientElicitationAnswer || isElicitationAnswerSaving || analysisOperationInProgress} onClick={generateRequirements}>
           <Icon name="sparkles" className="size-4" />
           {operation === "requirements" ? "Analisando sua elicitação…" : "Gerar requisitos com IA"}
         </Button>
-        <Button variant="secondary" className="w-full" disabled={!hasCompleteRefinementAnswers || processing} onClick={refineRequirements}>
+        <Button variant="secondary" className="w-full" disabled={!hasCompleteRefinementAnswers || hasOutdatedAmbiguityResult || isElicitationAnswerSaving || analysisOperationInProgress} onClick={refineRequirements}>
           <Icon name="sparkles" className="size-4" />
           {operation === "requirements-refinement" ? "Refinando requisitos…" : "Refinar requisitos com IA"}
         </Button>
@@ -145,8 +153,18 @@ export function AIAnalysisPanel({
       {hasRefinementQuestions && !hasCompleteRefinementAnswers && (
         <p className="mt-3 text-xs leading-5 text-violet-800/75">Responda todas as perguntas de refinamento atuais para liberar uma nova versão dos requisitos.</p>
       )}
+      {hasOutdatedAmbiguityResult && (
+        <p className="mt-3 rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-800" role="status">
+          {"A descri\u00e7\u00e3o inicial foi alterada. Detecte novamente as ambiguidades antes de gerar perguntas ou refinar requisitos."}
+        </p>
+      )}
+      {ambiguityRefreshState === "waiting" && (
+        <p className="mt-3 text-xs leading-5 text-violet-800/75" role="status">
+          {"Atualiza\u00e7\u00e3o autom\u00e1tica aguardando uma pausa na digita\u00e7\u00e3o."}
+        </p>
+      )}
       <p className="mt-4 text-xs leading-5 text-violet-800/75" aria-live="polite">
-        {operation === "ambiguities"
+        {detectingAmbiguities
           ? "A detecção está em andamento. O resultado aparecerá abaixo da sessão quando estiver pronto."
           : operation === "refinement-questions"
             ? "As ambiguidades abertas desta sessão estão sendo transformadas em perguntas de esclarecimento."
@@ -154,7 +172,9 @@ export function AIAnalysisPanel({
             ? "A geração está em andamento. Os resultados aparecerão abaixo da sessão quando estiverem prontos."
             : operation === "requirements-refinement"
               ? "As respostas de refinamento estão sendo aplicadas em uma nova versão dos requisitos."
-            : hasAmbiguityResult || hasRefinementQuestions || hasGeneratedResult
+            : hasOutdatedAmbiguityResult
+              ? "A an\u00e1lise anterior est\u00e1 desatualizada em rela\u00e7\u00e3o \u00e0 descri\u00e7\u00e3o atual."
+              : hasAmbiguityResult || hasRefinementQuestions || hasGeneratedResult
               ? "Os resultados mais recentes estão disponíveis abaixo da sessão. Você pode executar uma nova análise quando necessário."
               : "Os resultados serão exibidos em uma área dedicada abaixo da sessão após a análise."}
       </p>

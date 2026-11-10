@@ -365,6 +365,7 @@ test("a API preserva ownership, histórico, vínculo de origem e respostas versi
         elicitationAnswer: initialAnswer.content,
         sessionId: session.id,
         sourceAnswerId: initialAnswer.id,
+        ambiguityAnalysisId: firstAmbiguity.generatedByAnalysisId,
         previousAnswers: [],
         ambiguities: [{
           id: firstAmbiguity.id,

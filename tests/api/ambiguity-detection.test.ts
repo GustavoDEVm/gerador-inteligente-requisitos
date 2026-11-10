@@ -71,6 +71,10 @@ test("o contrato de ambiguidades é estruturado e o MockAIProvider cobre cenári
     ...baseRequest,
     userInput: "Os requisitos completos e sem ambiguidades foram validados com todos os envolvidos.",
   });
+  const schoolTasks = await provider.generateStructuredResponse({
+    ...baseRequest,
+    userInput: "Quero um sistema para gerenciar tarefas da escola, permitindo cadastrar atividades, atribuir responsáveis e acompanhar prazos e entregas.",
+  });
 
   assert.equal(first.model, MOCK_MODEL);
   assert.deepEqual(first, second);
@@ -82,6 +86,9 @@ test("o contrato de ambiguidades é estruturado e o MockAIProvider cobre cenári
     "Não está definido como funciona a combinação de tamanho e cor de cada produto.",
   ]);
   assert.doesNotMatch(JSON.stringify(first.output), /\b(aluno|livro|acervo|reserva)\b/i);
+  assert.ok(schoolTasks.output.ambiguities.some((ambiguity) => /tarefas|alunos|professores|prazos|entregas/i.test(ambiguity.description)));
+  assert.doesNotMatch(JSON.stringify(schoolTasks.output), /\b(estoque|cliente|tamanho|cor|carrinho|pedido)\b/i);
+  assert.ok(schoolTasks.output.ambiguities.every((ambiguity) => ambiguity.context === schoolTasks.output.ambiguities[0]?.context));
   assert.deepEqual(noAmbiguities.output, { ambiguities: [] });
 });
 
@@ -151,12 +158,13 @@ test("a API detecta, persiste e preserva o histórico de ambiguidades sem chamar
       assert.equal(firstAnalysis.status, "SUCCEEDED");
       assert.equal(firstAnalysis.provider, "mock");
       assert.equal(firstAnalysis.model, MOCK_MODEL);
-      assert.equal(firstAnalysis.promptVersion, "ambiguities-v1");
+      assert.equal(firstAnalysis.promptVersion, "ambiguities-v2");
       assert.equal(firstAnalysis.sessions[0]?.sessionId, session.id);
       assert.deepEqual(firstAnalysis.inputSnapshot, {
         input: initialAnswer.content,
         sessionId: session.id,
         sourceAnswerId: initialAnswer.id,
+        sourceAnswerVersion: initialAnswer.version,
       });
       assert.deepEqual(firstAnalysis.structuredOutput, firstPayload.data.result);
       assert.equal(firstAnalysis.ambiguities.length, 3);
