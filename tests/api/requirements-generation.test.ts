@@ -178,6 +178,7 @@ test("a API gera, persiste e rastreia requisitos sem chamar Gemini", async () =>
         input,
         sessionId: session.id,
         sourceAnswerId: initialAnswer.id,
+        sourceAnswerVersion: initialAnswer.version,
       });
       assert.equal(firstAnalysis.generatedStories.length, 1);
       assert.equal(firstAnalysis.generatedStories[0]?.acceptanceCriteria.length, firstPayload.data.result.acceptanceCriteria.length);

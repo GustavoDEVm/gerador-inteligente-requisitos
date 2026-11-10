@@ -3,7 +3,7 @@ import type { AIProvider, StructuredGenerationRequest, StructuredGenerationRespo
 
 export const MOCK_MODEL = "mock";
 
-type MockDomain = "clothing-store" | "library" | "generic";
+type MockDomain = "clothing-store" | "school-task-management" | "library" | "generic";
 
 type MockPriorAnswer = {
   question: string;
@@ -16,12 +16,14 @@ type MockRefinementContext = {
 };
 
 const clothingKeywords = ["roupa", "roupas", "vestuário", "vestuario", "moda", "tamanho", "carrinho", "estoque"];
+const schoolTaskKeywords = ["tarefa", "tarefas", "atividade", "atividades", "escola", "escolar", "aluno", "alunos", "professor", "professores", "prazo", "prazos", "entrega", "entregas", "turma", "turmas"];
 const libraryKeywords = ["biblioteca", "livro", "livros", "acervo"];
 
 function getMockDomain(input: string): MockDomain {
   const normalizedInput = input.trim().toLocaleLowerCase("pt-BR");
 
   if (clothingKeywords.some((keyword) => normalizedInput.includes(keyword))) return "clothing-store";
+  if (schoolTaskKeywords.some((keyword) => normalizedInput.includes(keyword))) return "school-task-management";
   if (libraryKeywords.some((keyword) => normalizedInput.includes(keyword))) return "library";
   return "generic";
 }
@@ -246,6 +248,25 @@ const libraryAmbiguities = [
   },
 ];
 
+const schoolTaskAmbiguities = [
+  {
+    description: "Não está definido quem pode cadastrar e atribuir tarefas aos alunos.",
+    severity: "high" as const,
+  },
+  {
+    description: "Não está definido como os prazos, as entregas e a conclusão das tarefas serão controlados.",
+    severity: "high" as const,
+  },
+  {
+    description: "Não está definido quais permissões professores e alunos possuem para acompanhar ou alterar as tarefas.",
+    severity: "medium" as const,
+  },
+  {
+    description: "Não está definido como os usuários serão notificados sobre novas tarefas, prazos ou entregas.",
+    severity: "low" as const,
+  },
+];
+
 const genericAmbiguities = [
   {
     description: "Não está definido quais usuários podem executar o fluxo principal.",
@@ -271,6 +292,8 @@ function mockAmbiguityResponse(input: string) {
   const domain = getMockDomain(input);
   const ambiguities = domain === "clothing-store"
     ? clothingAmbiguities
+    : domain === "school-task-management"
+      ? schoolTaskAmbiguities
     : domain === "library"
       ? libraryAmbiguities
       : genericAmbiguities;

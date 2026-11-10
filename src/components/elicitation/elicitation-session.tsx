@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AIAnalysisPanel } from "@/components/ai/ai-analysis-panel";
 import { AmbiguityDetectionResults } from "@/components/ai/ambiguity-detection-results";
@@ -46,15 +46,31 @@ type PersistedSessionAnalysis = {
   id: string;
   type: "REQUIREMENT_EXTRACTION" | "AMBIGUITY_DETECTION" | "QUESTION_GENERATION" | "REFINEMENT";
   status: "SUCCEEDED";
+  inputSnapshot: unknown;
   structuredOutput: unknown;
   createdAt: string;
 };
+
+type PersistedAnswer = {
+  id: string;
+  version: number;
+  content: string;
+};
+
+type AnalyzedInitialAnswer = PersistedAnswer;
+
+type AmbiguityRefreshState = "idle" | "waiting" | "running" | "failed";
+type AmbiguityDetectionTrigger = "automatic" | "manual";
+
+const AMBIGUITY_REFRESH_DEBOUNCE_MS = 1_500;
 
 type SessionDetails = {
   id: string;
   title: string | null;
   context: string;
   status: SessionItem["status"];
+  currentAmbiguityAnalysisId?: string | null;
+  currentRefinementQuestionAnalysisId?: string | null;
   analyses: { analysis: PersistedSessionAnalysis }[];
 };
 
@@ -85,12 +101,22 @@ export function ElicitationSession({
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ambiguityResult, setAmbiguityResult] = useState<AmbiguityDetectionResponse | null>(null);
+  const [analyzedInitialAnswer, setAnalyzedInitialAnswer] = useState<AnalyzedInitialAnswer | null>(null);
+  const [ambiguityRefreshState, setAmbiguityRefreshState] = useState<AmbiguityRefreshState>("idle");
+  const [ambiguityRefreshError, setAmbiguityRefreshError] = useState<string | null>(null);
+  const [automaticRefreshRetryKey, setAutomaticRefreshRetryKey] = useState(0);
   const [refinementResult, setRefinementResult] = useState<RefinementQuestionsResponse | null>(null);
   const [refinementAnalysisId, setRefinementAnalysisId] = useState<string | null>(null);
   const [generatedResult, setGeneratedResult] = useState<RequirementsGenerationResponse | null>(null);
   const [refinedResult, setRefinedResult] = useState<RequirementsGenerationResponse | null>(null);
   const [sessionDeletionOpen, setSessionDeletionOpen] = useState(false);
   const [deletionMessage, setDeletionMessage] = useState<string | null>(null);
+  const ambiguityRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ambiguityDetectionInFlightRef = useRef(false);
+  const automaticRefreshPendingRef = useRef(false);
+  const currentInitialAnswerRef = useRef("");
+  const currentSessionIdRef = useRef("");
+  const ambiguityRefreshStateRef = useRef<AmbiguityRefreshState>("idle");
 
   useEffect(() => {
     let active = true;
@@ -152,15 +178,25 @@ export function ElicitationSession({
             return latestAnswer ? [[item.id, latestAnswer]] : [];
           }),
         );
-        const rehydratedResults = rehydratePersistedAnalysisResults(session.analyses.map((item) => item.analysis));
+        const selectedRefinementAnalysisId = latestRefinementAnalysisIdFromItems(items);
+        const rehydratedResults = rehydratePersistedAnalysisResults(
+          session.analyses.map((item) => item.analysis),
+          session.currentAmbiguityAnalysisId,
+          session.currentRefinementQuestionAnalysisId === undefined
+            ? selectedRefinementAnalysisId
+            : session.currentRefinementQuestionAnalysisId,
+        );
         setQuestions(items);
         if (session.status === "DRAFT") {
           setSessionTitle(session.title ?? "");
           setInitialDescription(session.context);
         }
-        setRefinementAnalysisId(latestRefinementAnalysisIdFromItems(items));
+        setRefinementAnalysisId(selectedRefinementAnalysisId);
         setAnswers(savedAnswers);
         setAmbiguityResult(rehydratedResults.ambiguityResult);
+        setAnalyzedInitialAnswer(rehydratedResults.analyzedInitialAnswer);
+        setAmbiguityRefreshState("idle");
+        setAmbiguityRefreshError(null);
         setRefinementResult(rehydratedResults.refinementResult);
         setGeneratedResult(rehydratedResults.generatedResult);
         setRefinedResult(rehydratedResults.refinedResult);
@@ -178,13 +214,43 @@ export function ElicitationSession({
 
   const elicitationQuestions = questions.filter((item) => item.source !== "AI");
   const refinementQuestions = refinementQuestionsFromItems(questions, refinementAnalysisId);
-  const hasCompleteRefinementAnswers = refinementQuestions.length > 0 && refinementQuestions.every((question) => question.answers.length > 0);
   const question = elicitationQuestions[currentIndex];
   const project = projects.find((item) => item.id === projectId);
   const progress = elicitationQuestions.length > 0 ? Math.round(((currentIndex + 1) / elicitationQuestions.length) * 100) : 0;
   const initialQuestion = elicitationQuestions.find((item) => item.position === 1);
-  const initialAnswer = initialQuestion ? answers[initialQuestion.id] ?? initialQuestion.answers.at(-1)?.content ?? "" : "";
+  const latestInitialAnswer = initialQuestion?.answers.at(-1);
+  const editingInitialQuestion = question?.id === initialQuestion?.id;
+  const initialAnswer = initialQuestion
+    ? (editingInitialQuestion ? answer : answers[initialQuestion.id] ?? latestInitialAnswer?.content ?? "")
+    : "";
   const hasSufficientElicitationAnswer = initialAnswer.trim().length >= 20;
+  const isInitialAnswerDirty = Boolean(
+    latestInitialAnswer && initialAnswer.trim() !== latestInitialAnswer.content.trim(),
+  );
+  const isAmbiguityResultOutdated = Boolean(
+    ambiguityResult
+    && analyzedInitialAnswer
+    && (
+      isInitialAnswerDirty
+      || (latestInitialAnswer?.version !== undefined && latestInitialAnswer.version !== analyzedInitialAnswer.version)
+      || initialAnswer.trim() !== analyzedInitialAnswer.content.trim()
+    ),
+  );
+  const visibleRefinementQuestions = isAmbiguityResultOutdated ? [] : refinementQuestions;
+  const hasCompleteRefinementAnswers = visibleRefinementQuestions.length > 0
+    && visibleRefinementQuestions.every((refinementQuestion) => refinementQuestion.answers.length > 0);
+
+  useEffect(() => {
+    currentInitialAnswerRef.current = initialAnswer.trim();
+  }, [initialAnswer]);
+
+  useEffect(() => {
+    ambiguityRefreshStateRef.current = ambiguityRefreshState;
+  }, [ambiguityRefreshState]);
+
+  useEffect(() => {
+    currentSessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   async function startElicitation() {
     if (!projectId || !initialDescription.trim() || starting) return;
@@ -205,7 +271,11 @@ export function ElicitationSession({
       if (started.session.id === sessionId) setSessionReloadKey((key) => key + 1);
       setSessionId(started.session.id);
       setCreatingNewSession(false);
+      automaticRefreshPendingRef.current = false;
       setAmbiguityResult(null);
+      setAnalyzedInitialAnswer(null);
+      setAmbiguityRefreshState("idle");
+      setAmbiguityRefreshError(null);
       setRefinementResult(null);
       setRefinementAnalysisId(null);
       setGeneratedResult(null);
@@ -219,6 +289,126 @@ export function ElicitationSession({
     }
   }
 
+  const applySavedAnswer = useCallback((questionId: string, savedAnswer: PersistedAnswer) => {
+    setQuestions((current) => current.map((item) => (
+      item.id === questionId && !item.answers.some((itemAnswer) => itemAnswer.id === savedAnswer.id)
+        ? { ...item, answers: [...item.answers, savedAnswer] }
+        : item
+    )));
+    setAnswers((current) => ({ ...current, [questionId]: savedAnswer.content }));
+  }, []);
+
+  const persistInitialAnswerForAnalysis = useCallback(async (): Promise<PersistedAnswer> => {
+    if (!initialQuestion) throw new Error("A sessÃ£o nÃ£o possui uma pergunta inicial para analisar.");
+
+    const content = initialAnswer.trim();
+    if (content.length < 20) throw new Error("Registre uma resposta de elicitaÃ§Ã£o com pelo menos 20 caracteres antes de detectar ambiguidades.");
+
+    const latestAnswer = latestInitialAnswer;
+    if (latestAnswer && latestAnswer.content.trim() === content) return latestAnswer;
+
+    setSaving(true);
+    setError(null);
+    try {
+      const savedAnswer = await apiFetch<PersistedAnswer>(`/api/questions/${initialQuestion.id}/answers`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      });
+      applySavedAnswer(initialQuestion.id, savedAnswer);
+      if (editingInitialQuestion) setAnswer(savedAnswer.content);
+      return savedAnswer;
+    } finally {
+      setSaving(false);
+    }
+  }, [applySavedAnswer, editingInitialQuestion, initialAnswer, initialQuestion, latestInitialAnswer]);
+
+  const runAmbiguityDetection = useCallback(async (trigger: AmbiguityDetectionTrigger): Promise<void> => {
+    if (ambiguityDetectionInFlightRef.current) {
+      if (trigger === "automatic") {
+        automaticRefreshPendingRef.current = true;
+        return;
+      }
+      throw new Error("Uma detecÃ§Ã£o de ambiguidades jÃ¡ estÃ¡ em andamento.");
+    }
+
+    if (ambiguityRefreshTimerRef.current) {
+      clearTimeout(ambiguityRefreshTimerRef.current);
+      ambiguityRefreshTimerRef.current = null;
+    }
+
+    ambiguityDetectionInFlightRef.current = true;
+    setAmbiguityRefreshState("running");
+    setAmbiguityRefreshError(null);
+    const sourceSessionId = sessionId;
+    const isCurrentSession = () => sourceSessionId === currentSessionIdRef.current;
+    let sourceAnswer: PersistedAnswer | null = null;
+
+    try {
+      sourceAnswer = await persistInitialAnswerForAnalysis();
+      if (!isCurrentSession()) return;
+      if (sourceAnswer.content !== currentInitialAnswerRef.current) {
+        automaticRefreshPendingRef.current = true;
+        setAmbiguityRefreshState("waiting");
+        return;
+      }
+
+      const result = await apiFetch<AmbiguityDetectionResponse>("/api/ai/detect-ambiguities", {
+        method: "POST",
+        body: JSON.stringify({ projectId, sessionId }),
+      });
+      if (!isCurrentSession()) return;
+      if (sourceAnswer.content !== currentInitialAnswerRef.current) {
+        automaticRefreshPendingRef.current = true;
+        setAmbiguityRefreshState("waiting");
+        return;
+      }
+
+      setAmbiguityResult(result);
+      setAnalyzedInitialAnswer(sourceAnswer);
+      setRefinementResult(null);
+      setRefinementAnalysisId(null);
+      setQuestions((current) => current.filter((item) => item.source !== "AI"));
+      setAmbiguityRefreshState("idle");
+    } catch (requestError) {
+      if (!isCurrentSession()) return;
+      const stillCurrent = sourceAnswer?.content === currentInitialAnswerRef.current;
+      if (!stillCurrent) {
+        automaticRefreshPendingRef.current = true;
+        setAmbiguityRefreshState("waiting");
+        return;
+      }
+
+      const message = requestError instanceof Error ? requestError.message : "NÃ£o foi possÃ­vel atualizar as ambiguidades automaticamente.";
+      setAmbiguityRefreshState("failed");
+      setAmbiguityRefreshError(message);
+      if (trigger === "manual") throw requestError;
+    } finally {
+      ambiguityDetectionInFlightRef.current = false;
+      if (isCurrentSession() && automaticRefreshPendingRef.current) {
+        automaticRefreshPendingRef.current = false;
+        setAmbiguityRefreshState("waiting");
+        setAutomaticRefreshRetryKey((key) => key + 1);
+      }
+    }
+  }, [persistInitialAnswerForAnalysis, projectId, sessionId]);
+
+  useEffect(() => {
+    if (!isAmbiguityResultOutdated || !hasSufficientElicitationAnswer || ambiguityRefreshStateRef.current === "failed") return;
+
+    setAmbiguityRefreshState("waiting");
+    setAmbiguityRefreshError(null);
+    ambiguityRefreshTimerRef.current = setTimeout(() => {
+      void runAmbiguityDetection("automatic");
+    }, AMBIGUITY_REFRESH_DEBOUNCE_MS);
+
+    return () => {
+      if (ambiguityRefreshTimerRef.current) {
+        clearTimeout(ambiguityRefreshTimerRef.current);
+        ambiguityRefreshTimerRef.current = null;
+      }
+    };
+  }, [automaticRefreshRetryKey, hasSufficientElicitationAnswer, initialAnswer, isAmbiguityResultOutdated, runAmbiguityDetection]);
+
   async function advance() {
     if (!question || !answer.trim()) return;
 
@@ -227,8 +417,8 @@ export function ElicitationSession({
     try {
       const latestSavedAnswer = question.answers.at(-1)?.content;
       if (answer.trim() !== latestSavedAnswer) {
-        await apiFetch(`/api/questions/${question.id}/answers`, { method: "POST", body: JSON.stringify({ content: answer.trim() }) });
-        setAnswers((current) => ({ ...current, [question.id]: answer.trim() }));
+        const savedAnswer = await apiFetch<PersistedAnswer>(`/api/questions/${question.id}/answers`, { method: "POST", body: JSON.stringify({ content: answer.trim() }) });
+        applySavedAnswer(question.id, savedAnswer);
       }
       if (currentIndex === elicitationQuestions.length - 1) {
         await apiFetch(`/api/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify({ status: "COMPLETED" }) });
@@ -254,7 +444,11 @@ export function ElicitationSession({
 
   function selectProject(nextProjectId: string) {
     setProjectId(nextProjectId);
+    automaticRefreshPendingRef.current = false;
     setAmbiguityResult(null);
+    setAnalyzedInitialAnswer(null);
+    setAmbiguityRefreshState("idle");
+    setAmbiguityRefreshError(null);
     setRefinementResult(null);
     setRefinementAnalysisId(null);
     setGeneratedResult(null);
@@ -269,7 +463,11 @@ export function ElicitationSession({
 
   function selectSession(nextSessionId: string) {
     setSessionId(nextSessionId);
+    automaticRefreshPendingRef.current = false;
     setAmbiguityResult(null);
+    setAnalyzedInitialAnswer(null);
+    setAmbiguityRefreshState("idle");
+    setAmbiguityRefreshError(null);
     setRefinementResult(null);
     setRefinementAnalysisId(null);
     setGeneratedResult(null);
@@ -285,6 +483,10 @@ export function ElicitationSession({
   function beginNewSession() {
     setCreatingNewSession(true);
     setSessionId("");
+    automaticRefreshPendingRef.current = false;
+    setAnalyzedInitialAnswer(null);
+    setAmbiguityRefreshState("idle");
+    setAmbiguityRefreshError(null);
     setQuestions([]);
     setSessionTitle("");
     setInitialDescription("");
@@ -301,7 +503,11 @@ export function ElicitationSession({
     setCurrentIndex(0);
     setAnswer("");
     setCreatingNewSession(false);
+    automaticRefreshPendingRef.current = false;
     setAmbiguityResult(null);
+    setAnalyzedInitialAnswer(null);
+    setAmbiguityRefreshState("idle");
+    setAmbiguityRefreshError(null);
     setRefinementResult(null);
     setRefinementAnalysisId(null);
     setGeneratedResult(null);
@@ -405,11 +611,15 @@ export function ElicitationSession({
             projectId={projectId}
             sessionId={sessionId}
             hasSufficientElicitationAnswer={hasSufficientElicitationAnswer}
-            hasAmbiguityResult={ambiguityResult !== null}
-            hasRefinementQuestions={refinementResult !== null || refinementQuestions.length > 0}
+            isElicitationAnswerSaving={saving}
+            hasOutdatedAmbiguityResult={isAmbiguityResultOutdated}
+            ambiguityRefreshState={ambiguityRefreshState}
+            ambiguityRefreshError={ambiguityRefreshError}
+            hasAmbiguityResult={ambiguityResult !== null && !isAmbiguityResultOutdated}
+            hasRefinementQuestions={!isAmbiguityResultOutdated && (refinementResult !== null || refinementQuestions.length > 0)}
             hasCompleteRefinementAnswers={hasCompleteRefinementAnswers}
             hasGeneratedResult={generatedResult !== null}
-            onAmbiguitiesDetected={setAmbiguityResult}
+            onDetectAmbiguities={() => runAmbiguityDetection("manual")}
             onRefinementQuestionsGenerated={(result) => {
               setRefinementResult(result);
               setRefinementAnalysisId(result.analysisId);
@@ -445,17 +655,20 @@ export function ElicitationSession({
           </Card>
         </aside>
       </div>
-      {ambiguityResult ? <AmbiguityDetectionResults result={ambiguityResult} /> : null}
-      <RefinementQuestionsResults
-        questions={refinementQuestions}
-        generated={refinementResult !== null || refinementQuestions.length > 0}
-        hasAmbiguities={(ambiguityResult?.result.ambiguities.length ?? 0) > 0}
-        onAnswerSaved={(questionId, savedAnswer) => {
-          setQuestions((current) => current.map((item) => (
-            item.id === questionId ? { ...item, answers: [...item.answers, savedAnswer] } : item
-          )));
-        }}
-      />
+      {ambiguityResult ? <AmbiguityDetectionResults result={ambiguityResult} outdated={isAmbiguityResultOutdated} /> : null}
+      {isAmbiguityResultOutdated ? (
+        <Card className="border-amber-200 bg-amber-50 p-5" role="status">
+          <h2 className="font-bold text-amber-950">Perguntas de refinamento desatualizadas</h2>
+          <p className="mt-2 text-sm leading-6 text-amber-900">{"A ideia inicial foi alterada. As perguntas da an\u00e1lise anterior foram preservadas no hist\u00f3rico, mas n\u00e3o se aplicam \u00e0 descri\u00e7\u00e3o atual. Detecte novamente as ambiguidades para continuar."}</p>
+        </Card>
+      ) : (
+        <RefinementQuestionsResults
+          questions={visibleRefinementQuestions}
+          generated={refinementResult !== null || visibleRefinementQuestions.length > 0}
+          hasAmbiguities={(ambiguityResult?.result.ambiguities.length ?? 0) > 0}
+          onAnswerSaved={applySavedAnswer}
+        />
+      )}
       {generatedResult ? <GeneratedRequirementsResults result={generatedResult} /> : null}
       {refinedResult ? <GeneratedRequirementsResults result={refinedResult} variant="refined" /> : null}
       <Dialog open={finished} onClose={() => setFinished(false)} title="Coleta finalizada">
@@ -517,17 +730,31 @@ function latestRefinementAnalysisIdFromItems(items: QuestionItem[]): string | nu
   return question?.generatedByAnalysis?.id ?? null;
 }
 
-function rehydratePersistedAnalysisResults(analyses: PersistedSessionAnalysis[]) {
+function rehydratePersistedAnalysisResults(
+  analyses: PersistedSessionAnalysis[],
+  currentAmbiguityAnalysisId: string | null | undefined = undefined,
+  currentRefinementQuestionAnalysisId: string | null | undefined = undefined,
+) {
   let ambiguityResult: AmbiguityDetectionResponse | null = null;
+  let analyzedInitialAnswer: AnalyzedInitialAnswer | null = null;
   let refinementResult: RefinementQuestionsResponse | null = null;
   let generatedResult: RequirementsGenerationResponse | null = null;
   let refinedResult: RequirementsGenerationResponse | null = null;
 
   for (const analysis of [...analyses].sort((first, second) => new Date(first.createdAt).getTime() - new Date(second.createdAt).getTime())) {
-    if (analysis.type === "AMBIGUITY_DETECTION" && isAmbiguityDetectionResult(analysis.structuredOutput)) {
+    if (
+      analysis.type === "AMBIGUITY_DETECTION"
+      && (currentAmbiguityAnalysisId === undefined || analysis.id === currentAmbiguityAnalysisId)
+      && isAmbiguityDetectionResult(analysis.structuredOutput)
+    ) {
       ambiguityResult = { analysisId: analysis.id, result: analysis.structuredOutput };
+      analyzedInitialAnswer = getAnalyzedInitialAnswer(analysis.inputSnapshot);
     }
-    if (analysis.type === "QUESTION_GENERATION" && isRefinementQuestionsResult(analysis.structuredOutput)) {
+    if (
+      analysis.type === "QUESTION_GENERATION"
+      && (currentRefinementQuestionAnalysisId === undefined || analysis.id === currentRefinementQuestionAnalysisId)
+      && isRefinementQuestionsResult(analysis.structuredOutput)
+    ) {
       refinementResult = { analysisId: analysis.id, result: analysis.structuredOutput };
     }
     if (analysis.type === "REQUIREMENT_EXTRACTION" && isRequirementsGenerationResult(analysis.structuredOutput)) {
@@ -538,7 +765,21 @@ function rehydratePersistedAnalysisResults(analyses: PersistedSessionAnalysis[])
     }
   }
 
-  return { ambiguityResult, refinementResult, generatedResult, refinedResult };
+  return { ambiguityResult, analyzedInitialAnswer, refinementResult, generatedResult, refinedResult };
+}
+
+function getAnalyzedInitialAnswer(value: unknown): AnalyzedInitialAnswer | null {
+  if (!isRecord(value)) return null;
+  const { sourceAnswerId, sourceAnswerVersion, input } = value;
+  if (
+    typeof sourceAnswerId !== "string"
+    || typeof sourceAnswerVersion !== "number"
+    || !Number.isInteger(sourceAnswerVersion)
+    || sourceAnswerVersion < 1
+    || typeof input !== "string"
+  ) return null;
+
+  return { id: sourceAnswerId, version: sourceAnswerVersion, content: input };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
